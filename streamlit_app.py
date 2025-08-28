@@ -32,8 +32,6 @@ if USE_SUPABASE:
         st.warning(f"Не удалось инициализировать Supabase: {e}")
         USE_SUPABASE = False
 
-# (видео-демо больше не используется, код оставляем минимальным — ничего не вызывается)
-
 # ====== ОФОРМЛЕНИЕ ======
 st.markdown(
     """
@@ -44,8 +42,6 @@ st.markdown(
       .hdr .sub { opacity:.8 }
       .hdr + .spacer { height: 10px; }
       hr { margin: 10px 0 22px 0; opacity:.25; }
-      .stTabs { margin-top: .6rem !important; }
-      .stTabs [data-baseweb="tab-list"] { overflow-x: auto; }
       .stDateInput, .stNumberInput, .stTextInput { margin-bottom: .35rem; }
     </style>
     """,
@@ -228,12 +224,16 @@ def render_hour_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame):
         .encode(
             x=x_axis,
             y=alt.Y("Значение:Q", title="Количество", stack="zero"),
-            color=alt.Color("Сегмент:N", title=""),
+            color=alt.Color(
+                "Сегмент:N",
+                title="",
+                scale=alt.Scale(domain=["Итого (B)", "Изначально (A)"])
+            ),
+            order=alt.Order("Сегмент:N", sort=["Итого (B)", "Изначально (A)"]),
             tooltip=[
                 alt.Tooltip("hour:T", title="Час"),
                 alt.Tooltip("Сегмент:N"),
                 alt.Tooltip("Значение:Q", title="В сегменте"),
-                alt.Tooltip(alt.datum(0), title=""),  # пустая строка-разделитель
             ],
         )
         .properties(
@@ -268,7 +268,7 @@ def capital_calculator(bins_df: pd.DataFrame):
             weights_g[cat] = st.number_input(
                 f"Вес ({cat}), г/шт",
                 min_value=0.0,
-                step=10.0,        # можно кликать +10
+                step=10.0,
                 value=DEFAULT_WEIGHT_G.get(cat, 0.0),
                 format="%.2f",
                 key=f"calc_w_{cat}",
@@ -277,7 +277,7 @@ def capital_calculator(bins_df: pd.DataFrame):
             prices_kg[cat] = st.number_input(
                 f"Цена ({cat}), тг/кг",
                 min_value=0.0,
-                step=10.0,        # можно кликать +10
+                step=10.0,
                 value=DEFAULT_PRICE_KG.get(cat, 0.0),
                 format="%.2f",
                 key=f"calc_p_{cat}",
