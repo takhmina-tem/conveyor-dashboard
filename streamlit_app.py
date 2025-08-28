@@ -188,6 +188,8 @@ def page_login():
             st.session_state["route"] = "app"
             st.rerun()
     st.caption("Доступ выдаётся администраторами.")
+
+# ====== ЧАРТ ПО ЧАСАМ (STACKED: B внизу, (A-B) сверху; сумма = A) ======
 def render_hour_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame):
     ha = hour_counts(dfA).rename(columns={"count": "initial"})   # A = Изначально
     hb = hour_counts(dfB).rename(columns={"count": "collected"}) # B = Итого (Б)
@@ -199,23 +201,21 @@ def render_hour_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame):
     merged[["initial", "collected"]] = merged[["initial", "collected"]].fillna(0).astype(int)
     merged["diff"] = (merged["initial"] - merged["collected"]).clip(lower=0)
 
-    # long-формат для стекования: низ = B, верх = A-B
-    long_df = pd.concat(
-        [
-            merged[["hour", "collected"]]
-            .rename(columns={"collected": "Значение"})
-            .assign(Сегмент="Итого (B)"),
-            merged[["hour", "diff"]]
-            .rename(columns={"diff": "Значение"})
-            .assign(Сегмент="Изначально (A)"),
-        ],
-        ignore_index=True,
-    )
+    # Готовим long-формат для стекования
+    long_df = pd.concat([
+        merged[["hour", "collected"]].rename(columns={"collected": "Значение"}).assign(Сегмент="Итого (B)"),
+        merged[["hour", "diff"]].rename(columns={"diff": "Значение"}).assign(Сегмент="Изначально (A)"),
+    ], ignore_index=True)
 
     x_axis = alt.X(
         "hour:T",
         title="Дата и час",
-        axis=alt.Axis(titlePadding=24, labelOverlap=True, labelFlush=True, titleAnchor="start"),
+        axis=alt.Axis(
+            titlePadding=24,
+            labelOverlap=True,
+            labelFlush=True,
+            titleAnchor="start"
+        ),
     )
 
     chart = (
@@ -224,7 +224,6 @@ def render_hour_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame):
         .encode(
             x=x_axis,
             y=alt.Y("Значение:Q", title="Количество", stack="zero"),
-            # порядок в легенде фиксируем через domain; stack ляжет корректно
             color=alt.Color(
                 "Сегмент:N",
                 title="",
@@ -236,16 +235,33 @@ def render_hour_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame):
                 alt.Tooltip("Значение:Q", title="В сегменте"),
             ],
         )
-        .properties(height=320, padding={"top": 10, "right": 12, "bottom": 44, "left": 8})
-        .configure_axis(labelFontSize=12, titleFontSize=12)
+        .properties(
+            height=320,
+            padding={"top": 10, "right": 12, "bottom": 44, "left": 8}
+        )
+        .configure_axis(
+            labelFontSize=12,
+            titleFontSize=12,
+        )
     )
 
     st.altair_chart(chart, use_container_width=True)
     st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
 
-# ====== КАЛЬКУЛЯТОР КАПИТАЛА (ввод вручную, нули по умолчанию, шаг +10) ======
+# ====== КАЛЬКУЛЯТОР КАПИТАЛА (текстовый ввод, плейсхолдер "0") ======
 DEFAULT_WEIGHT_G = {"<30": 0.0, "30–40": 0.0, "40–50": 0.0, "50–60": 0.0, ">60": 0.0}
 DEFAULT_PRICE_KG = {"<30": 0.0, "30–40": 0.0, "40–50": 0.0, "50–60": 0.0, ">60": 0.0}
+
+def _parse_float(s: str) -> float:
+    if s is None:
+        return 0.0
+    s = s.strip().replace(",", ".")
+    if s == "":
+        return 0.0
+    try:
+        return float(s)
+    except:
+        return 0.0
 
 def capital_calculator(bins_df: pd.DataFrame):
     st.markdown("### Калькулятор капитала")
@@ -257,25 +273,25 @@ def capital_calculator(bins_df: pd.DataFrame):
     weights_g = {}
     prices_kg = {}
 
+    # Текстовый ввод: виден «серый» 0 (placeholder), но поле пустое — можно просто печатать
     for i, cat in enumerate(CATEGORIES):
         with col_w[i]:
-            weights_g[cat] = st.number_input(
+            raw_w = st.text_input(
                 f"Вес ({cat}), г/шт",
-                min_value=0.0,
-                step=10.0,
-                value=DEFAULT_WEIGHT_G.get(cat, 0.0),
-                format="%.2f",
+                value=st.session_state.get(f"calc_w_{cat}", ""),
+                placeholder="0",
                 key=f"calc_w_{cat}",
             )
+            weights_g[cat] = _parse_float(raw_w)
+
         with col_p[i]:
-            prices_kg[cat] = st.number_input(
+            raw_p = st.text_input(
                 f"Цена ({cat}), тг/кг",
-                min_value=0.0,
-                step=10.0,
-                value=DEFAULT_PRICE_KG.get(cat, 0.0),
-                format="%.2f",
+                value=st.session_state.get(f"calc_p_{cat}", ""),
+                placeholder="0",
                 key=f"calc_p_{cat}",
             )
+            prices_kg[cat] = _parse_float(raw_p)
 
     kg_totals = {cat: (counts.get(cat, 0) * weights_g.get(cat, 0.0)) / 1000.0 for cat in CATEGORIES}
     subtotals = {cat: kg_totals[cat] * prices_kg.get(cat, 0.0) for cat in CATEGORIES}
@@ -294,7 +310,8 @@ def capital_calculator(bins_df: pd.DataFrame):
 
 # ====== ГЛАВНАЯ СТРАНИЦА ======
 def page_dashboard_online():
-    header("Онлайн-данные")
+    # убрали подзаголовок "Онлайн-данные"
+    header()
 
     c_top1, c_top2, c_top3 = st.columns([1.3,1,1])
     with c_top1:
