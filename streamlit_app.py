@@ -188,8 +188,6 @@ def page_login():
             st.session_state["route"] = "app"
             st.rerun()
     st.caption("Доступ выдаётся администраторами.")
-
-# ====== ЧАРТ ПО ЧАСАМ (STACKED: B внизу, (A-B) сверху; сумма = A) ======
 def render_hour_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame):
     ha = hour_counts(dfA).rename(columns={"count": "initial"})   # A = Изначально
     hb = hour_counts(dfB).rename(columns={"count": "collected"}) # B = Итого (Б)
@@ -201,21 +199,23 @@ def render_hour_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame):
     merged[["initial", "collected"]] = merged[["initial", "collected"]].fillna(0).astype(int)
     merged["diff"] = (merged["initial"] - merged["collected"]).clip(lower=0)
 
-    # Готовим long-формат для стекования
-    long_df = pd.concat([
-        merged[["hour", "collected"]].rename(columns={"collected": "Значение"}).assign(Сегмент="Итого (B)"),
-        merged[["hour", "diff"]].rename(columns={"diff": "Значение"}).assign(Сегмент="Изначально (A)"),
-    ], ignore_index=True)
+    # long-формат для стекования: низ = B, верх = A-B
+    long_df = pd.concat(
+        [
+            merged[["hour", "collected"]]
+            .rename(columns={"collected": "Значение"})
+            .assign(Сегмент="Итого (B)"),
+            merged[["hour", "diff"]]
+            .rename(columns={"diff": "Значение"})
+            .assign(Сегмент="Изначально (A)"),
+        ],
+        ignore_index=True,
+    )
 
     x_axis = alt.X(
         "hour:T",
         title="Дата и час",
-        axis=alt.Axis(
-            titlePadding=24,
-            labelOverlap=True,
-            labelFlush=True,
-            titleAnchor="start"
-        ),
+        axis=alt.Axis(titlePadding=24, labelOverlap=True, labelFlush=True, titleAnchor="start"),
     )
 
     chart = (
@@ -224,26 +224,20 @@ def render_hour_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame):
         .encode(
             x=x_axis,
             y=alt.Y("Значение:Q", title="Количество", stack="zero"),
+            # порядок в легенде фиксируем через domain; stack ляжет корректно
             color=alt.Color(
                 "Сегмент:N",
                 title="",
                 scale=alt.Scale(domain=["Итого (B)", "Изначально (A)"])
             ),
-            order=alt.Order("Сегмент:N", sort=["Итого (B)", "Изначально (A)"]),
             tooltip=[
                 alt.Tooltip("hour:T", title="Час"),
                 alt.Tooltip("Сегмент:N"),
                 alt.Tooltip("Значение:Q", title="В сегменте"),
             ],
         )
-        .properties(
-            height=320,
-            padding={"top": 10, "right": 12, "bottom": 44, "left": 8}
-        )
-        .configure_axis(
-            labelFontSize=12,
-            titleFontSize=12,
-        )
+        .properties(height=320, padding={"top": 10, "right": 12, "bottom": 44, "left": 8})
+        .configure_axis(labelFontSize=12, titleFontSize=12)
     )
 
     st.altair_chart(chart, use_container_width=True)
