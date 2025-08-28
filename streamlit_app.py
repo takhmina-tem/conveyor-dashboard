@@ -8,8 +8,8 @@ import streamlit as st
 import pandas as pd
 import altair as alt
 
-# ====== РЕЖИМ ДЕМО (насильно, без БД) ======
-DEMO_ALWAYS = True  # ← Поставь False, если хочешь использовать Supabase
+# ====== РЕЖИМ ДЕМО ДАННЫХ (НЕ ВЛИЯЕТ НА АВТОРИЗАЦИЮ) ======
+FORCE_DEMO_DATA = True  # ← поставьте False, чтобы читать реальные данные из БД
 
 # ====== БАЗОВЫЕ НАСТРОЙКИ ======
 st.set_page_config(
@@ -22,7 +22,7 @@ st.set_page_config(
 SUPABASE_URL = st.secrets.get("SUPABASE_URL", os.getenv("SUPABASE_URL"))
 SUPABASE_ANON_KEY = st.secrets.get("SUPABASE_ANON_KEY", os.getenv("SUPABASE_ANON_KEY"))
 
-USE_SUPABASE = (not DEMO_ALWAYS) and bool(SUPABASE_URL and SUPABASE_ANON_KEY)
+USE_SUPABASE = bool(SUPABASE_URL and SUPABASE_ANON_KEY)
 _sb = None
 if USE_SUPABASE:
     try:
@@ -32,11 +32,25 @@ if USE_SUPABASE:
         st.warning(f"Не удалось инициализировать Supabase: {e}")
         USE_SUPABASE = False
 
-# ====== ВИДЕО-ПУТИ (локальные файлы) ======
-A_RAW  = "/Users/takhmina/conveyor-vision/data/raw/videos/potato1.mp4"
-B_RAW  = "/Users/takhmina/conveyor-vision/data/raw/videos/potato2.mp4"
-A_ANNO = "/Users/takhmina/conveyor-vision/outputs/potatoA2_annotated.mp4"
-B_ANNO = "/Users/takhmina/conveyor-vision/outputs/potatoB2_annotated.mp4"
+# ====== ВИДЕО-ПУТИ (локальные + fallback) ======
+A_RAW_LOCAL  = "/Users/takhmina/conveyor-vision/data/raw/videos/potato1.mp4"
+B_RAW_LOCAL  = "/Users/takhmina/conveyor-vision/data/raw/videos/potato2.mp4"
+A_ANNO_LOCAL = "/Users/takhmina/conveyor-vision/outputs/potatoA2_annotated.mp4"
+B_ANNO_LOCAL = "/Users/takhmina/conveyor-vision/outputs/potatoB2_annotated.mp4"
+
+# Публичные fallback-видео (Google Drive, как было в ранней версии)
+A_RAW_FALLBACK  = "https://drive.google.com/uc?export=download&id=17_mf6Nn-BbRIC0FHl3fT5lWtTU8CUlEV"
+B_RAW_FALLBACK  = "https://drive.google.com/uc?export=download&id=1pJQoeqci4r3CnVRywGZWvHARFZ5JBwo1"
+A_ANNO_FALLBACK = "https://drive.google.com/uc?export=download&id=1HZ9U806VOdBeoiiAR_gF0ojabeZPCaWI"
+B_ANNO_FALLBACK = "https://drive.google.com/uc?export=download&id=1nI-4HNaXodkW9xnznikVvBwyFdITv2Yp"
+
+def show_video(title: str, local_path: str, fallback_url: str):
+    st.caption(title)
+    if local_path and os.path.exists(local_path):
+        st.video(local_path)
+    else:
+        # Без print/return выражений, чтобы не «выводить» DeltaGenerator
+        st.video(fallback_url)
 
 # ====== ОФОРМЛЕНИЕ ======
 st.markdown(
@@ -154,7 +168,7 @@ def demo_generate(day: date, base: int = 620, jitter: int = 90, seed: int = 42):
     Реалистичный демо-поток:
       - A (вход) ~ N(base, jitter)
       - B (собрано) = A * U(0.70, 0.85)
-      - width_cm ~ N(52..53, 7.5..8.5) c отсечением [25, 75]
+      - width_cm ~ N(52..53, 7.5..8.5) с отсечением [25, 75]
     """
     rng = random.Random(seed + int(day.strftime("%Y%m%d")))
     hours = [datetime.combine(day, time(h,0)) for h in range(24)]
@@ -314,7 +328,7 @@ def page_dashboard_online():
     start = datetime.combine(day, time.min).replace(tzinfo=timezone.utc)
     end   = datetime.combine(day, time.max).replace(tzinfo=timezone.utc)
 
-    if DEMO_ALWAYS:
+    if FORCE_DEMO_DATA:
         dfA, dfB = demo_generate(day)
     else:
         dfA = fetch_events("A", start, end)
@@ -350,20 +364,16 @@ def page_demo_from_videos():
     st.markdown("#### Ролики")
     left, right = st.columns(2)
     with left:
-        st.caption("Точка A — исходник")
-        st.video(A_RAW) if os.path.exists(A_RAW) else st.warning(f"Файл не найден: {A_RAW}")
-        st.caption("Точка A — аннотированное")
-        st.video(A_ANNO) if os.path.exists(A_ANNO) else st.warning(f"Файл не найден: {A_ANNO}")
+        show_video("Точка A — исходник", A_RAW_LOCAL, A_RAW_FALLBACK)
+        show_video("Точка A — аннотированное", A_ANNO_LOCAL, A_ANNO_FALLBACK)
     with right:
-        st.caption("Точка B — исходник")
-        st.video(B_RAW) if os.path.exists(B_RAW) else st.warning(f"Файл не найден: {B_RAW}")
-        st.caption("Точка B — аннотированное")
-        st.video(B_ANNO) if os.path.exists(B_ANNO) else st.warning(f"Файл не найден: {B_ANNO}")
+        show_video("Точка B — исходник", B_RAW_LOCAL, B_RAW_FALLBACK)
+        show_video("Точка B — аннотированное", B_ANNO_LOCAL, B_ANNO_FALLBACK)
 
     st.divider()
 
     st.markdown("#### Данные по роликам (за последние 2 часа)")
-    if DEMO_ALWAYS:
+    if FORCE_DEMO_DATA:
         dfA, dfB = demo_generate(date.today())
     else:
         start_dt = datetime.now(timezone.utc) - timedelta(hours=2)
@@ -390,12 +400,8 @@ def page_app():
 
 # ====== MAIN ======
 def main():
-    # Если демо-режим — авторизация не нужна
-    if DEMO_ALWAYS:
-        st.session_state["authed"] = True
-        st.session_state["route"] = "app"
-
-    elif not USE_SUPABASE:
+    # Если нет ключей Supabase — открываем приложение без авторизации
+    if not USE_SUPABASE:
         st.session_state["authed"] = True
         st.session_state["route"] = "app"
 
