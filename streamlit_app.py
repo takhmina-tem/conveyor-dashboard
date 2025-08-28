@@ -49,7 +49,6 @@ st.markdown(
       .stTabs [data-baseweb="tab-list"] { overflow-x: auto; }
       .stDateInput, .stNumberInput, .stTextInput { margin-bottom: .35rem; }
       /* скрыть служебные ARIA-уведомления, чтобы ничего не "подпрыгивало" */
-      div[aria-live='polite']{display:none!important}
     </style>
     """,
     unsafe_allow_html=True,
@@ -199,6 +198,7 @@ def render_hour_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame):
     if merged.empty:
         st.info("Нет данных за выбранный период.")
         return
+
     merged[["initial", "collected"]] = merged[["initial", "collected"]].fillna(0).astype(int)
     long_df = merged.melt(
         id_vars="hour",
@@ -209,18 +209,35 @@ def render_hour_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame):
     kind_map = {"initial": "Изначально", "collected": "Собрано"}
     long_df["Тип"] = long_df["kind"].map(kind_map)
     long_df = long_df.drop(columns=["kind"]).rename(columns={"value": "Значение"})
+
+    x_axis = alt.X(
+        "hour:T",
+        title="Дата и час",
+        axis=alt.Axis(
+            titlePadding=24,      # отступ подписи от оси
+            labelOverlap=True,
+            labelFlush=True,
+            titleAnchor="start"   # подпись оси X выравниваем слева
+        ),
+    )
+
     chart = (
         alt.Chart(long_df)
         .mark_bar()
         .encode(
-            x=alt.X("hour:T", title="Дата и час"),
+            x=x_axis,
             y=alt.Y("Значение:Q", title="Количество"),
             color=alt.Color("Тип:N", title=""),
-            tooltip=[alt.Tooltip("hour:T", title="Час"), alt.Tooltip("Тип:N"), alt.Tooltip("Значение:Q")],
+            tooltip=[
+                alt.Tooltip("hour:T", title="Час"),
+                alt.Tooltip("Тип:N"),
+                alt.Tooltip("Значение:Q"),
+            ],
         )
-        .properties(height=320)
-    )
-    st.altair_chart(chart, use_container_width=True)
+        .properties(
+            height=320,
+            padding={"top": 10, "right": 12, "bottom": 44, "left": 8}  # нижни
+
 
 # ====== КАЛЬКУЛЯТОР КАПИТАЛА (поля сразу на странице) ======
 DEFAULT_WEIGHT_G = {"<30": 80.0, "30–40": 150.0, "40–50": 220.0, "50–60": 300.0, ">60": 380.0}
