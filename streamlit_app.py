@@ -35,16 +35,27 @@ B_RAW  = "https://drive.google.com/uc?export=download&id=1pJQoeqci4r3CnVRywGZWvH
 A_ANNO = "https://drive.google.com/uc?export=download&id=1HZ9U806VOdBeoiiAR_gF0ojabeZPCaWI"
 B_ANNO = "https://drive.google.com/uc?export=download&id=1nI-4HNaXodkW9xnznikVvBwyFdITv2Yp"
 
-# ====== ОФОРМЛЕНИЕ (видимость заголовка и вкладок) ======
+# ====== ОФОРМЛЕНИЕ ======
 st.markdown(
     """
     <style>
-      .block-container { padding-top: 1rem; }
-      .hdr { display:flex; justify-content:space-between; align-items:center }
-      .hdr h1 { margin:0; font-size:26px; font-weight:800; letter-spacing:.3px }
-      hr { margin:8px 0 16px 0; opacity:.25 }
-      .stTabs { margin-top: .4rem !important; }
+      /* Чуть больше отступ сверху, чтобы шапка не "резалась" */
+      .block-container { padding-top: 2.25rem; }
+
+      /* Шапка */
+      .hdr { display:flex; justify-content:space-between; align-items:center; }
+      .hdr h1 { margin:0; font-size:26px; font-weight:800; letter-spacing:.3px; }
+      .hdr + .spacer { height: 10px; }
+
+      /* Разделитель после шапки с адекватным отступом */
+      hr { margin: 10px 0 22px 0; opacity:.25; }
+
+      /* Вкладки всегда видны и не налезают */
+      .stTabs { margin-top: .6rem !important; }
       .stTabs [data-baseweb="tab-list"] { overflow-x: auto; }
+
+      /* Чуть больше вертикальных отступов у блоков ввода, чтобы подписи не "задирались" */
+      .stDateInput, .stNumberInput, .stTextInput { margin-bottom: .35rem; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -52,9 +63,11 @@ st.markdown(
 
 def header(sub: str | None = None):
     st.markdown(
-        '<div class="hdr"><h1>Система отслеживания и учёта картофеля</h1></div><hr/>',
+        '<div class="hdr"><h1>Система отслеживания и учёта картофеля</h1></div>',
         unsafe_allow_html=True
     )
+    st.markdown('<div class="spacer"></div>', unsafe_allow_html=True)
+    st.markdown("<hr/>", unsafe_allow_html=True)
     if sub:
         st.caption(sub)
 
@@ -123,7 +136,7 @@ def hour_counts(df: pd.DataFrame) -> pd.DataFrame:
           .agg(count=("potato_id", "nunique"))
     )
 
-# ====== ТАБЛИЦА КАТЕГОРИЙ ======
+# ====== ТАБЛИЧНЫЕ КАТЕГОРИИ ======
 CATEGORIES = ["<30", "30–40", "40–50", "50–60", ">60"]
 
 def bins_table(dfA: pd.DataFrame, dfB: pd.DataFrame) -> pd.DataFrame:
@@ -140,8 +153,8 @@ def bins_table(dfA: pd.DataFrame, dfB: pd.DataFrame) -> pd.DataFrame:
         vc = cut.value_counts().reindex(labels).fillna(0).astype(int)
         return vc
 
-    A = count_bins(dfA)   # Изначально (A)
-    B = count_bins(dfB)   # Собрано   (B)
+    A = count_bins(dfA)   # Изначально (A) — вход
+    B = count_bins(dfB)   # Собрано   (B) — итог
     losses = (A - B).clip(lower=0)
     loss_pct = pd.Series({c: (0.0 if A[c]==0 else round(losses[c]/A[c]*100, 1)) for c in CATEGORIES})
 
@@ -154,32 +167,34 @@ def bins_table(dfA: pd.DataFrame, dfB: pd.DataFrame) -> pd.DataFrame:
     })
 
 # ====== ДЕМО-ДАННЫЕ ======
-def demo_generate(day: date, base: int = 600, jitter: int = 120, seed: int = 42):
+def demo_generate(day: date, base: int = 620, jitter: int = 90, seed: int = 42):
+    """Красивый демо-поток: B ≈ 70–85% от A, ширины 25–75 см."""
     rng = random.Random(seed + int(day.strftime("%Y%m%d")))
     hours = [datetime.combine(day, time(h,0)) for h in range(24)]
     rowsA, rowsB = [], []
     pid = 1
     for ts in hours:
         countA = max(0, int(rng.gauss(base, jitter)))
-        countB = int(countA * rng.uniform(0.6, 0.85))
+        # собранное — 70..85% от входа, чтобы «Потери» выглядели реалистично
+        countB = int(countA * rng.uniform(0.70, 0.85))
         for _ in range(countA):
-            width = max(25.0, min(75.0, rng.gauss(52.0, 9.5)))
+            width = max(25.0, min(75.0, rng.gauss(52.0, 8.5)))
             rowsA.append({"ts": ts + timedelta(minutes=rng.randint(0,59)), "point":"A", "potato_id":pid, "width_cm":width, "height_cm":width*0.7})
             pid += 1
         for _ in range(countB):
-            width = max(25.0, min(75.0, rng.gauss(53.0, 8.5)))
+            width = max(25.0, min(75.0, rng.gauss(53.0, 7.5)))
             rowsB.append({"ts": ts + timedelta(minutes=rng.randint(0,59)), "point":"B", "potato_id":pid, "width_cm":width, "height_cm":width*0.7})
             pid += 1
     return pd.DataFrame(rowsA), pd.DataFrame(rowsB)
 
-# ====== ЛОГИН ======
+# ====== ЛОГИН (без повторного header) ======
 def page_login():
-    header("Авторизация")
     st.subheader("Вход в систему")
     with st.form("login_form", clear_on_submit=False):
         email = st.text_input("E-mail", placeholder="you@company.com")
         password = st.text_input("Пароль", type="password", placeholder="••••••••")
         submitted = st.form_submit_button("Войти")
+
     if submitted:
         ok = True
         if USE_SUPABASE:
@@ -193,7 +208,9 @@ def page_login():
                 ok = False
         if ok:
             st.session_state["authed"] = True
-            go("app")
+            st.session_state["route"] = "app"
+            st.rerun()
+
     st.caption("Доступ выдаётся администраторами.")
 
 # ====== ЧАРТ ПО ЧАСАМ ======
@@ -228,60 +245,85 @@ def render_hour_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame):
                 alt.Tooltip("Значение:Q")
             ],
         )
-        .properties(height=300)
+        .properties(height=320)
     )
     st.altair_chart(chart, use_container_width=True)
 
-# ====== КАЛЬКУЛЯТОР КАПИТАЛА (цена/кг, тг) ======
+# ====== КАЛЬКУЛЯТОР КАПИТАЛА (по умолчанию без ручного ввода) ======
+DEFAULT_WEIGHT_G = {"<30": 80.0, "30–40": 150.0, "40–50": 220.0, "50–60": 300.0, ">60": 380.0}
+DEFAULT_PRICE_KG = {"<30": 0.0,  "30–40": 120.0, "40–50": 150.0, "50–60": 180.0, ">60": 200.0}
+
 def capital_calculator(bins_df: pd.DataFrame):
     st.markdown("### Калькулятор капитала")
-    st.caption("Укажите средний вес (г/шт) и цену (тг/кг) по категориям. Подсчёт по столбцу «Собрано».")
+    st.caption("Расчёт по столбцу «Собрано». Значения по умолчанию можно изменить в настройках ниже.")
+
     counts = dict(zip(bins_df["Категория"], bins_df["Собрано"]))
 
-    # дефолтные средние веса (примерные, можно менять)
-    default_weight_g = {"<30": 80.0, "30–40": 150.0, "40–50": 220.0, "50–60": 300.0, ">60": 380.0}
-    default_price_kg = {"<30": 0.0, "30–40": 120.0, "40–50": 150.0, "50–60": 180.0, ">60": 200.0}
-
-    col_w = st.columns(5)
-    col_p = st.columns(5)
-    weights_g = {}
-    prices_kg = {}
-
-    for i, cat in enumerate(CATEGORIES):
-        with col_w[i]:
-            weights_g[cat] = st.number_input(f"Вес ({cat}), г/шт", min_value=0.0, step=10.0,
-                                             value=default_weight_g.get(cat, 0.0), key=f"w_{cat}")
-        with col_p[i]:
-            prices_kg[cat] = st.number_input(f"Цена ({cat}), тг/кг", min_value=0.0, step=10.0,
-                                             value=default_price_kg.get(cat, 0.0), key=f"p_{cat}")
-
-    kg_totals = {cat: (counts.get(cat, 0) * weights_g.get(cat, 0.0)) / 1000.0 for cat in CATEGORIES}
-    subtotals = {cat: kg_totals[cat] * prices_kg.get(cat, 0.0) for cat in CATEGORIES}
+    # Расчёт по умолчанию
+    kg_totals = {cat: (counts.get(cat, 0) * DEFAULT_WEIGHT_G.get(cat, 0.0)) / 1000.0 for cat in CATEGORIES}
+    subtotals = {cat: kg_totals[cat] * DEFAULT_PRICE_KG.get(cat, 0.0) for cat in CATEGORIES}
     total_sum = round(sum(subtotals.values()), 2)
 
     calc_df = pd.DataFrame({
         "Категория":        CATEGORIES,
         "Собрано (шт)":     [int(counts.get(c, 0)) for c in CATEGORIES],
-        "Вес, г/шт":        [weights_g[c] for c in CATEGORIES],
+        "Вес, г/шт":        [DEFAULT_WEIGHT_G[c] for c in CATEGORIES],
         "Итого, кг":        [round(kg_totals[c], 3) for c in CATEGORIES],
-        "Цена, тг/кг":      [prices_kg[c] for c in CATEGORIES],
+        "Цена, тг/кг":      [DEFAULT_PRICE_KG[c] for c in CATEGORIES],
         "Сумма, тг":        [round(subtotals[c], 2) for c in CATEGORIES],
     })
     df_view(calc_df)
     st.subheader(f"Итого капитал: **{total_sum:,.2f} тг**".replace(",", " "))
 
+    # Опциональные ручные настройки
+    with st.expander("Доп. настройки (изменить веса/цены)", expanded=False):
+        col_w = st.columns(5)
+        col_p = st.columns(5)
+        weights_g = {}
+        prices_kg = {}
+        for i, cat in enumerate(CATEGORIES):
+            with col_w[i]:
+                weights_g[cat] = st.number_input(
+                    f"Вес ({cat}), г/шт", min_value=0.0, step=10.0,
+                    value=DEFAULT_WEIGHT_G.get(cat, 0.0), key=f"w_{cat}"
+                )
+            with col_p[i]:
+                prices_kg[cat] = st.number_input(
+                    f"Цена ({cat}), тг/кг", min_value=0.0, step=10.0,
+                    value=DEFAULT_PRICE_KG.get(cat, 0.0), key=f"p_{cat}"
+                )
+        if st.button("Пересчитать"):
+            kg_totals2 = {cat: (counts.get(cat, 0) * weights_g.get(cat, 0.0)) / 1000.0 for cat in CATEGORIES}
+            subtotals2 = {cat: kg_totals2[cat] * prices_kg.get(cat, 0.0) for cat in CATEGORIES}
+            total_sum2 = round(sum(subtotals2.values()), 2)
+            calc_df2 = pd.DataFrame({
+                "Категория":        CATEGORIES,
+                "Собрано (шт)":     [int(counts.get(c, 0)) for c in CATEGORIES],
+                "Вес, г/шт":        [weights_g[c] for c in CATEGORIES],
+                "Итого, кг":        [round(kg_totals2[c], 3) for c in CATEGORIES],
+                "Цена, тг/кг":      [prices_kg[c] for c in CATEGORIES],
+                "Сумма, тг":        [round(subtotals2[c], 2) for c in CATEGORIES],
+            })
+            df_view(calc_df2, "Результат по изменённым параметрам")
+            st.subheader(f"Итого капитал: **{total_sum2:,.2f} тг**".replace(",", " "))
+
 # ====== ГЛАВНАЯ ВКЛАДКА ======
 def page_dashboard_online():
-    # верхние метрики: Изначально / Потери / Собрано — самые первые
-    c_top1, c_top2, c_top3 = st.columns([1.2,1,1])
+    # Шапка над вкладками уже есть, добавим небольшой отступ перед контентом
+    st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
+
+    c_top1, c_top2, c_top3 = st.columns([1.3,1,1])
     with c_top1:
         day = st.date_input("Дата", value=date.today())
     with c_top2:
-        pass
+        st.empty()
     with c_top3:
         if st.button("Выйти"):
             st.session_state["authed"] = False
             go("login")
+
+    # Чуть больше воздуха под строкой с датой
+    st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
 
     # Источник данных
     start = datetime.combine(day, time.min).replace(tzinfo=timezone.utc)
@@ -289,11 +331,11 @@ def page_dashboard_online():
     dfA = fetch_events("A", start, end) if USE_SUPABASE else pd.DataFrame()
     dfB = fetch_events("B", start, end) if USE_SUPABASE else pd.DataFrame()
 
-    # Автодемо как в "красивой" версии: если записей нет — рисуем демо
+    # Автодемо как в «красивой» версии: если записей нет — рисуем демо
     if (dfA.empty and dfB.empty):
         dfA, dfB = demo_generate(day)
 
-    # Метрики вверх
+    # Метрики (Изначально / Потери / Собрано)
     total_initial = dfA["potato_id"].nunique() if not dfA.empty else 0
     total_collected = dfB["potato_id"].nunique() if not dfB.empty else 0
     total_losses = max(0, total_initial - total_collected)
@@ -303,16 +345,14 @@ def page_dashboard_online():
     m2.metric("Потери (шт)", value=f"{total_losses}")
     m3.metric("Собрано (шт)", value=f"{total_collected}")
 
-    # Поток по часам
     st.markdown("### Поток по часам")
     render_hour_chart_grouped(dfA, dfB)
 
-    # Таблица по количеству (упорядочена по запросу)
     st.markdown("### Таблица по количеству")
     bins_df = bins_table(dfA, dfB)
     df_view(bins_df[["Категория","Изначально","Потери (шт)","Собрано","% потери"]])
 
-    # Калькулятор капитала (тг, цена/кг)
+    # Калькулятор капитала (тг, цена/кг) — сразу считает по дефолту
     capital_calculator(bins_df)
 
 def page_demo_from_videos():
@@ -349,7 +389,7 @@ def page_demo_from_videos():
 
 # ====== ОБЩАЯ СТРАНИЦА-ПРИЛОЖЕНИЕ ======
 def page_app():
-    # Заголовок ВНЕ табов — чтобы вкладки всегда были видны целиком
+    # Заголовок ВНЕ табов — чтобы вкладки и верстка были стабильными
     header()
     tab1, tab2 = st.tabs(["Онлайн-данные", "Видео-демо (A/B)"])
     with tab1:
@@ -359,7 +399,7 @@ def page_app():
 
 # ====== MAIN ======
 def main():
-    # Если нет ключей Supabase — сразу открываем приложение без авторизации
+    # Если нет ключей Supabase — открываем приложение без авторизации
     if not USE_SUPABASE:
         st.session_state["authed"] = True
         st.session_state["route"] = "app"
@@ -368,11 +408,12 @@ def main():
     authed = st.session_state.get("authed", False)
 
     if route == "login" and USE_SUPABASE and not authed:
-        # На логине тоже показываем заголовок корректно
+        # Рисуем ОДНУ шапку здесь
         header("Авторизация")
         page_login()
         return
 
+    # Иначе — само приложение
     page_app()
 
 if __name__ == "__main__":
