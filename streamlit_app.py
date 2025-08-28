@@ -48,7 +48,6 @@ st.markdown(
       .stTabs { margin-top: .6rem !important; }
       .stTabs [data-baseweb="tab-list"] { overflow-x: auto; }
       .stDateInput, .stNumberInput, .stTextInput { margin-bottom: .35rem; }
-      /* скрыть служебные ARIA-уведомления, чтобы ничего не "подпрыгивало" */
     </style>
     """,
     unsafe_allow_html=True,
@@ -214,10 +213,10 @@ def render_hour_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame):
         "hour:T",
         title="Дата и час",
         axis=alt.Axis(
-            titlePadding=24,      # отступ подписи от оси
+            titlePadding=24,
             labelOverlap=True,
             labelFlush=True,
-            titleAnchor="start"   # подпись оси X выравниваем слева
+            titleAnchor="start"
         ),
     )
 
@@ -236,12 +235,20 @@ def render_hour_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame):
         )
         .properties(
             height=320,
-            padding={"top": 10, "right": 12, "bottom": 44, "left": 8}  # нижни
+            padding={"top": 10, "right": 12, "bottom": 44, "left": 8}
+        )
+        .configure_axis(
+            labelFontSize=12,
+            titleFontSize=12,
+        )
+    )
 
+    st.altair_chart(chart, use_container_width=True)
+    st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
 
-# ====== КАЛЬКУЛЯТОР КАПИТАЛА (поля сразу на странице) ======
-DEFAULT_WEIGHT_G = {"<30": 80.0, "30–40": 150.0, "40–50": 220.0, "50–60": 300.0, ">60": 380.0}
-DEFAULT_PRICE_KG = {"<30": 0.0,  "30–40": 120.0, "40–50": 150.0, "50–60": 180.0, ">60": 200.0}
+# ====== КАЛЬКУЛЯТОР КАПИТАЛА (по умолчанию все нули) ======
+DEFAULT_WEIGHT_G = {"<30": 0.0, "30–40": 0.0, "40–50": 0.0, "50–60": 0.0, ">60": 0.0}
+DEFAULT_PRICE_KG = {"<30": 0.0, "30–40": 0.0, "40–50": 0.0, "50–60": 0.0, ">60": 0.0}
 
 def capital_calculator(bins_df: pd.DataFrame):
     st.markdown("### Калькулятор капитала")
@@ -301,8 +308,8 @@ def page_dashboard_online():
     dfA = fetch_events("A", start, end) if USE_SUPABASE else pd.DataFrame()
     dfB = fetch_events("B", start, end) if USE_SUPABASE else pd.DataFrame()
 
-    # Всегда заполняем демо-данными, если пусто
-    if (dfA.empty and dfB.empty):
+    # Если БД пустая — подставляем демо-данные, чтобы графики/таблицы не были пустыми
+    if dfA.empty and dfB.empty:
         dfA, dfB = demo_generate(day)
 
     total_initial = dfA["potato_id"].nunique() if not dfA.empty else 0
@@ -316,11 +323,15 @@ def page_dashboard_online():
 
     st.markdown("### Поток по часам")
     render_hour_chart_grouped(dfA, dfB)
-    
+
+    # Отступ перед таблицей, чтобы подпись оси X не накладывалась
+    st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+
     st.markdown("### Таблица по количеству")
     bins_df = bins_table(dfA, dfB)
     df_view(bins_df[["Категория","Изначально","Потери (шт)","Собрано","% потери"]])
 
+    # Калькулятор — по умолчанию нули
     capital_calculator(bins_df)
 
 def page_demo_from_videos():
@@ -347,7 +358,7 @@ def page_demo_from_videos():
     dfA = fetch_events("A", start_dt, end_dt)
     dfB = fetch_events("B", start_dt, end_dt)
 
-    # Если пусто — подставим демо за сегодня, чтобы графики не были пустыми
+    # Если пусто — демо за сегодня
     if dfA.empty and dfB.empty:
         dfA, dfB = demo_generate(date.today())
 
