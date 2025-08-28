@@ -15,7 +15,7 @@ st.set_page_config(
     layout="wide",
 )
 
-# ====== КЛЮЧИ (через .streamlit/secrets.toml или env) ======
+# ====== КЛЮЧИ (через Streamlit Secrets или env) ======
 SUPABASE_URL = st.secrets.get("SUPABASE_URL", os.getenv("SUPABASE_URL"))
 SUPABASE_ANON_KEY = st.secrets.get("SUPABASE_ANON_KEY", os.getenv("SUPABASE_ANON_KEY"))
 
@@ -37,16 +37,17 @@ B_ANNO = "https://drive.google.com/uc?export=download&id=1nI-4HNaXodkW9xnznikVvB
 
 # ====== ОФОРМЛЕНИЕ ======
 st.markdown(
-    "<style>.block-container{padding-top:1.2rem}.hdr{display:flex;justify-content:space-between;align-items:center}.hdr h1{margin:0;font-size:26px;font-weight:800;letter-spacing:.3px}.hdr .sub{opacity:.8}hr{margin:8px 0 16px 0;opacity:.25}div[aria-live='polite']{display:none!important}</style>",
+    "<style>.block-container{padding-top:1.2rem}.hdr{display:flex;justify-content:space-between;align-items:center}.hdr h1{margin:0;font-size:26px;font-weight:800;letter-spacing:.3px}hr{margin:8px 0 16px 0;opacity:.25}div[aria-live='polite']{display:none!important}</style>",
     unsafe_allow_html=True,
 )
 
-def header(sub=""):
+def header(sub: str | None = None):
     st.markdown(
-        '<div class="hdr"><h1>Система отслеживания и учёта картофеля</h1>'
-        f'<div class="sub">{sub}</div></div><hr/>',
+        '<div class="hdr"><h1>Система отслеживания и учёта картофеля</h1></div><hr/>',
         unsafe_allow_html=True
     )
+    if sub:
+        st.caption(sub)
 
 def df_view(df: pd.DataFrame, caption: str = ""):
     if caption:
@@ -54,7 +55,6 @@ def df_view(df: pd.DataFrame, caption: str = ""):
     st.dataframe(df, use_container_width=True)
 
 def video_player(url: str):
-    # HTML-видеоплеер надёжнее работает с прямыми ссылками GDrive
     st.markdown(
         f"""
         <video width="100%" controls>
@@ -81,40 +81,22 @@ def _ensure_aware_utc(dt: datetime) -> datetime:
         return dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
 
-def safe_datetime_input(label: str, value: datetime) -> datetime:
-    if hasattr(st, "datetime_input"):
-        dt = st.datetime_input(label, value=value)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        else:
-            dt = dt.astimezone(timezone.utc)
-        return dt
-    # Фоллбек для старых Streamlit
-    c1, c2 = st.columns([1.2, 1])
-    with c1:
-        d = st.date_input(label + " — дата", value=value.date())
-    with c2:
-        t = st.time_input(label + " — время", value=value.time())
-    return datetime.combine(d, t).replace(tzinfo=timezone.utc)
-
 # ====== ЧТЕНИЕ ДАННЫХ ======
-def fetch_events(point: Optional[str], start_dt: datetime, end_dt: datetime, batch: Optional[str] = None) -> pd.DataFrame:
-    """Возвращает ts (naive UTC), point, potato_id, width_cm, height_cm, batch."""
+def fetch_events(point: Optional[str], start_dt: datetime, end_dt: datetime) -> pd.DataFrame:
+    """Возвращает ts (naive UTC), point, potato_id, width_cm, height_cm."""
     if not USE_SUPABASE:
-        return pd.DataFrame(columns=["ts","point","potato_id","width_cm","height_cm","batch"])
+        return pd.DataFrame(columns=["ts","point","potato_id","width_cm","height_cm"])
 
     try:
         q = _sb.table("events").select("*").order("ts", desc=False)
         if point:
             q = q.eq("point", point)
-        if batch:
-            q = q.eq("batch", batch)
 
         start_iso = _ensure_aware_utc(start_dt).isoformat()
         end_iso   = _ensure_aware_utc(end_dt).isoformat()
         data = q.gte("ts", start_iso).lte("ts", end_iso).execute().data
 
-        df = pd.DataFrame(data) if data else pd.DataFrame(columns=["ts","point","potato_id","width_cm","height_cm","batch"])
+        df = pd.DataFrame(data) if data else pd.DataFrame(columns=["ts","point","potato_id","width_cm","height_cm"])
         if "ts" in df.columns:
             df["ts"] = pd.to_datetime(df["ts"], utc=True, errors="coerce")\
                           .dt.tz_convert("UTC").dt.tz_localize(None)
@@ -124,47 +106,46 @@ def fetch_events(point: Optional[str], start_dt: datetime, end_dt: datetime, bat
         return df
     except Exception as e:
         st.warning(f"Ошибка чтения из Supabase: {e}")
-        return pd.DataFrame(columns=["ts","point","potato_id","width_cm","height_cm","batch"])
+        return pd.DataFrame(columns=["ts","point","potato_id","width_cm","height_cm"])
 
-def hour_bars(df: pd.DataFrame):
+def hour_counts(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty or "ts" not in df.columns:
         return pd.DataFrame({"hour":[], "count":[]})
-    return (df.assign(hour=pd.to_datetime(df["ts"]).dt.floor("h"))
-              .groupby("hour", as_index=False)
-              .agg(count=("potato_id", "nunique")))
+    return (
+        df.assign(hour=pd.to_datetime(df["ts"]).dt.floor("h"))
+          .groupby("hour", as_index=False)
+          .agg(count=("potato_id", "nunique"))
+    )
 
-def bins_table(dfA: pd.DataFrame, dfB: pd.DataFrame):
-    cols = [">60","50–60","40–50","30–40"]
+# ====== ТАБЛИЦА КАТЕГОРИЙ ======
+CATEGORIES = ["<30", "30–40", "40–50", "50–60", ">60"]
 
-    def count_bins(df: pd.DataFrame):
-        if df.empty or ("width_cm" not in df.columns) or df["width_cm"].isna().all():
-            n = df["potato_id"].nunique() if "potato_id" in df.columns else len(df)
-            q = n // 4; r = n - 3*q
-            return pd.Series({">60":r, "50–60":q, "40–50":q, "30–40":q})
+def bins_table(dfA: pd.DataFrame, dfB: pd.DataFrame) -> pd.DataFrame:
+    """A=Изначально, B=Собрано. Возвращает таблицу по категориям."""
+    def count_bins(df: pd.DataFrame) -> pd.Series:
+        if df.empty or ("width_cm" not in df.columns):
+            return pd.Series({c: 0 for c in CATEGORIES})
+
         bins = [0,30,40,50,60,10_000]
-        labels_all = ["<30","30–40","40–50","50–60",">60"]
-        cut = pd.cut(df["width_cm"].fillna(-1), bins=bins, labels=labels_all, right=False, include_lowest=True)
-        vc = cut.value_counts().reindex(labels_all).fillna(0).astype(int)
-        return pd.Series({
-            ">60":   int(vc[">60"]),
-            "50–60": int(vc["50–60"]),
-            "40–50": int(vc["40–50"]),
-            "30–40": int(vc["30–40"]),
-        })
+        labels = CATEGORIES
+        cut = pd.cut(
+            df["width_cm"].fillna(-1),
+            bins=bins, labels=labels, right=False, include_lowest=True
+        )
+        vc = cut.value_counts().reindex(labels).fillna(0).astype(int)
+        return vc
 
-    A = count_bins(dfA)
-    B = count_bins(dfB)
-    total = A
-    collected = B
+    A = count_bins(dfA)  # Изначально (точка A)
+    B = count_bins(dfB)  # Собрано   (точка B)
     discarded = (A - B).clip(lower=0)
-    loss_pct = pd.Series({c: (0.0 if total[c]==0 else round(discarded[c]/total[c]*100, 1)) for c in cols})
+    loss_pct = pd.Series({c: (0.0 if A[c]==0 else round(discarded[c]/A[c]*100, 1)) for c in CATEGORIES})
 
     return pd.DataFrame({
-        "Категория":  cols,
-        "Общее":      [int(total[c])     for c in cols],
-        "Собрано":    [int(collected[c]) for c in cols],
-        "Выброшено":  [int(discarded[c]) for c in cols],
-        "% Потери":   [float(loss_pct[c]) for c in cols],
+        "Категория":   CATEGORIES,
+        "Собрано":     [int(B[c]) for c in CATEGORIES],
+        "Изначально":  [int(A[c]) for c in CATEGORIES],
+        "Выброшено":   [int(discarded[c]) for c in CATEGORIES],
+        "% потери":    [float(loss_pct[c]) for c in CATEGORIES],
     })
 
 # ====== ДЕМО-ДАННЫЕ ======
@@ -177,11 +158,11 @@ def demo_generate(day: date, base: int = 600, jitter: int = 120, seed: int = 42)
         countA = max(0, int(rng.gauss(base, jitter)))
         countB = int(countA * rng.uniform(0.6, 0.85))
         for _ in range(countA):
-            width = max(28.0, min(75.0, rng.gauss(52.0, 9.5)))
+            width = max(25.0, min(75.0, rng.gauss(52.0, 9.5)))
             rowsA.append({"ts": ts + timedelta(minutes=rng.randint(0,59)), "point":"A", "potato_id":pid, "width_cm":width, "height_cm":width*0.7})
             pid += 1
         for _ in range(countB):
-            width = max(28.0, min(75.0, rng.gauss(53.0, 8.5)))
+            width = max(25.0, min(75.0, rng.gauss(53.0, 8.5)))
             rowsB.append({"ts": ts + timedelta(minutes=rng.randint(0,59)), "point":"B", "potato_id":pid, "width_cm":width, "height_cm":width*0.7})
             pid += 1
     return pd.DataFrame(rowsA), pd.DataFrame(rowsB)
@@ -208,73 +189,138 @@ def page_login():
         if ok:
             st.session_state["authed"] = True
             go("app")
-    st.caption(
-        "Доступ выдаётся администраторами. "
-        + ("(Supabase подключён)" if USE_SUPABASE else "(Supabase ключи не заданы — авторизация отключена)")
+    # Только эта строка должна оставаться
+    st.caption("Доступ выдаётся администраторами.")
+
+def render_hour_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame):
+    # Агрегируем поминутно -> по часам
+    ha = hour_counts(dfA).rename(columns={"count":"initial"})
+    hb = hour_counts(dfB).rename(columns={"count":"collected"})
+    hours = pd.date_range(
+        start=(min([ha["hour"].min(), hb["hour"].min()] + [datetime.combine(date.today(), time(0,0))]) if not ha.empty or not hb.empty else datetime.combine(date.today(), time(0,0))),
+        end=(max([ha["hour"].max(), hb["hour"].max()] + [datetime.combine(date.today(), time(23,0))]) if not ha.empty or not hb.empty else datetime.combine(date.today(), time(23,0))),
+        freq="H"
+    )
+    base = pd.DataFrame({"hour": hours})
+    merged = base.merge(ha, on="hour", how="left").merge(hb, on="hour", how="left")
+    merged[["initial","collected"]] = merged[["initial","collected"]].fillna(0).astype(int)
+
+    viz = (
+        alt.Chart(merged)
+        .transform_fold(
+            ["Изначально","Собрано"],
+            as_=["Тип","Значение"],
+            # сопоставление к колонкам
+        )
+        .calculate("datum['Тип'] == 'Изначально' ? datum.initial : datum.collected")
     )
 
-def render_hour_chart(df):
-    bars = hour_bars(df)
-    if bars.empty:
-        st.info("Нет данных за выбранный период.")
-        return
+    # Altair не умеет напрямую из calculate писать в ту же колонку, поэтому сделаем второй шаг
+    # проще — подготовим «длинную» таблицу заранее:
+    long_df = pd.concat([
+        merged.assign(Тип="Изначально", Значение=merged["initial"])[["hour","Тип","Значение"]],
+        merged.assign(Тип="Собрано",    Значение=merged["collected"])[["hour","Тип","Значение"]],
+    ])
+
     chart = (
-        alt.Chart(bars)
+        alt.Chart(long_df)
         .mark_bar()
         .encode(
             x=alt.X("hour:T", title="Дата и час"),
-            y=alt.Y("count:Q", title="Количество"),
-            tooltip=["hour:T","count:Q"]
+            y=alt.Y("Значение:Q", title="Количество"),
+            color=alt.Color("Тип:N", title=""),
+            tooltip=[alt.Tooltip("hour:T", title="Час"),
+                     alt.Tooltip("Тип:N"),
+                     alt.Tooltip("Значение:Q")]
         )
-        .properties(height=280)
+        .properties(height=300)
     )
     st.altair_chart(chart, use_container_width=True)
 
-def page_dashboard_online():
-    header("Онлайн-данные")
+def capital_calculator(bins_df: pd.DataFrame):
+    st.markdown("### Калькулятор капитала")
+    st.caption("Задайте цену за единицу для каждой категории. Подсчёт ведётся по столбцу «Собрано».")
+    counts = dict(zip(bins_df["Категория"], bins_df["Собрано"]))
 
-    c1, c2, c3, c4 = st.columns([1,1.2,1.2,2])
+    cols = st.columns(5)
+    default_prices = {"<30": 0.0, "30–40": 0.2, "40–50": 0.25, "50–60": 0.3, ">60": 0.35}
+    prices = {}
+    for i, cat in enumerate(CATEGORIES):
+        with cols[i]:
+            prices[cat] = st.number_input(f"Цена ({cat})", min_value=0.0, step=0.01, value=default_prices.get(cat, 0.0), key=f"price_{cat}")
+
+    # Подсчёты
+    subtotals = {cat: float(counts.get(cat, 0)) * float(prices.get(cat, 0.0)) for cat in CATEGORIES}
+    total = round(sum(subtotals.values()), 2)
+
+    # Вывод
+    calc_df = pd.DataFrame({
+        "Категория": CATEGORIES,
+        "Собрано (шт)": [int(counts.get(c, 0)) for c in CATEGORIES],
+        "Цена за шт":   [prices[c] for c in CATEGORIES],
+        "Сумма":        [round(subtotals[c], 2) for c in CATEGORIES],
+    })
+    df_view(calc_df)
+    st.subheader(f"Итого капитал: **{total}**")
+
+def page_dashboard_online():
+    header()
+
+    c1, c2, c3 = st.columns([1.2,1,1])
     with c1:
-        point = st.selectbox("Точка", ["A","B"], index=0)
-    with c2:
         day = st.date_input("Дата", value=date.today())
+    with c2:
+        pass
     with c3:
-        demo_mode = st.toggle("Демо-режим", value=True, help="Если БД пуста — сгенерировать красивую картину.")
-    with c4:
         if st.button("Выйти"):
             st.session_state["authed"] = False
             go("login")
 
-    # (Опционально) фильтр по batch на онлайновой вкладке
-    batch_tag = st.text_input("batch-тег (необязательно)", value="")
+    # Источник данных:
+    # - если есть Supabase и данные за день → берем их,
+    # - иначе генерируем демо.
+    start = datetime.combine(day, time.min).replace(tzinfo=timezone.utc)
+    end   = datetime.combine(day, time.max).replace(tzinfo=timezone.utc)
 
-    if demo_mode:
+    dfA = fetch_events("A", start, end) if USE_SUPABASE else pd.DataFrame()
+    dfB = fetch_events("B", start, end) if USE_SUPABASE else pd.DataFrame()
+
+    if (dfA.empty and dfB.empty):
         dfA, dfB = demo_generate(day)
-    else:
-        start = datetime.combine(day, time.min).replace(tzinfo=timezone.utc)
-        end   = datetime.combine(day, time.max).replace(tzinfo=timezone.utc)
-        dfA = fetch_events("A", start, end, batch=batch_tag or None)
-        dfB = fetch_events("B", start, end, batch=batch_tag or None)
-        if dfA.empty and dfB.empty:
-            dfA, dfB = demo_generate(day)
 
-    df_current = dfA if point == "A" else dfB
-
+    # ----- Поток по часам (групповой бар-чарт: Изначально vs Собрано) -----
     st.markdown("### Поток по часам")
-    render_hour_chart(df_current)
+    render_hour_chart_grouped(dfA, dfB)
 
+    # ----- Таблица по количеству -----
     st.markdown("### Таблица по количеству")
-    df_view(bins_table(dfA, dfB))
+    bins_df = bins_table(dfA, dfB)
+    df_view(bins_df)
+
+    # ----- Калькулятор капитала -----
+    capital_calculator(bins_df)
+
+    # ----- Индикаторы внизу -----
+    st.divider()
+    total_A = dfA["potato_id"].nunique() if not dfA.empty else 0
+    total_B = dfB["potato_id"].nunique() if not dfB.empty else 0
+    losses_pct = (0.0 if total_A == 0 else round((total_A - total_B) / total_A * 100, 1))
+
+    avg_size = round(float(dfB["width_cm"].mean()), 1) if ("width_cm" in dfB.columns and not dfB["width_cm"].empty) else 0.0
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Собрано сегодня (шт)", value=f"{total_B}")
+    m2.metric("Средний размер (см)", value=f"{avg_size}")
+    m3.metric("Потери", value=f"{losses_pct} %")
 
 def page_demo_from_videos():
     header("Видео-демо (A/B)")
 
-    # --- Ролики ---
     st.markdown("#### Ролики")
     left, right = st.columns(2)
     with left:
         st.caption("Точка A — исходник")
-        video_player(A_RAW)    # без os.path.exists
+        video_player(A_RAW)
         st.caption("Точка A — аннотированное")
         video_player(A_ANNO)
     with right:
@@ -285,56 +331,25 @@ def page_demo_from_videos():
 
     st.divider()
 
-    # --- Данные по роликам (только время и точка; batch не используется) ---
-    st.markdown("#### Данные по роликам")
-    info = st.container()
-    c1, c2, c3 = st.columns([1.1, 1.1, 1.1])
-    with c1:
-        point_for_view = st.selectbox("Точка для графика", ["A","B"], index=0)
-    with c2:
-        start_dt = safe_datetime_input("Начало интервала (UTC)", value=datetime.now(timezone.utc) - timedelta(hours=2))
-    with c3:
-        end_dt = safe_datetime_input("Конец интервала (UTC)", value=datetime.now(timezone.utc))
-
-    dfA = fetch_events("A", start_dt, end_dt, batch=None)
-    dfB = fetch_events("B", start_dt, end_dt, batch=None)
+    # Пример простого просмотра распределения за интервал (если есть данные в БД)
+    st.markdown("#### Данные по роликам (если есть события в БД)")
+    start_dt = datetime.now(timezone.utc) - timedelta(hours=2)
+    end_dt   = datetime.now(timezone.utc)
+    dfA = fetch_events("A", start_dt, end_dt)
+    dfB = fetch_events("B", start_dt, end_dt)
 
     if dfA.empty and dfB.empty:
-        with info:
-            st.info("Данных за заданный интервал пока нет. Проверь интервал времени (UTC) и запуски A/B.")
-        if st.button("Обновить"):
-            st.rerun()
-        st.markdown("### Поток по часам"); st.info("Нет данных.")
-        st.markdown("### Таблица по количеству"); st.info("Нет данных.")
-        st.stop()
+        st.info("Данных за интервал нет или БД не подключена.")
+        return
 
-    df_current = dfA if point_for_view == "A" else dfB
+    st.markdown("##### Поток по часам")
+    render_hour_chart_grouped(dfA, dfB)
 
-    st.markdown("### Поток по часам")
-    render_hour_chart(df_current)
-
-    st.markdown("### Таблица по количеству")
+    st.markdown("##### Таблица по количеству")
     df_view(bins_table(dfA, dfB))
-
-    with st.expander("ДЕТАЛИ за час"):
-        hour_sel = st.time_input("Час (локальное начало)", value=time(10,0))
-        chosen_day = start_dt.date()
-        hstart = datetime.combine(chosen_day, hour_sel)
-        hend   = hstart + timedelta(hours=1) - timedelta(milliseconds=1)
-        maskA = (dfA["ts"].between(hstart, hend)) if not dfA.empty else pd.Series([], dtype=bool)
-        maskB = (dfB["ts"].between(hstart, hend)) if not dfB.empty else pd.Series([], dtype=bool)
-        df_view(
-            bins_table(
-                dfA[maskA] if not dfA.empty else dfA,
-                dfB[maskB] if not dfB.empty else dfB
-            ),
-            "Только за выбранный час"
-        )
 
 # ====== ОБЩАЯ СТРАНИЦА-ПРИЛОЖЕНИЕ ======
 def page_app():
-    sub = "Supabase: ✅ авторизация включена" if USE_SUPABASE else "Supabase: ⛔ ключи не заданы (авторизация отключена)"
-    header(sub)
     tab1, tab2 = st.tabs(["Онлайн-данные", "Видео-демо (A/B)"])
     with tab1:
         page_dashboard_online()
@@ -343,7 +358,7 @@ def page_app():
 
 # ====== MAIN ======
 def main():
-    # Если нет ключей Supabase — открываем сразу приложение без авторизации
+    # Если нет ключей Supabase — сразу открываем приложение без авторизации
     if not USE_SUPABASE:
         st.session_state["authed"] = True
         st.session_state["route"] = "app"
