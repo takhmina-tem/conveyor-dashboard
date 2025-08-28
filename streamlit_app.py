@@ -8,6 +8,9 @@ import streamlit as st
 import pandas as pd
 import altair as alt
 
+# ====== РЕЖИМ ДЕМО (насильно, без БД) ======
+DEMO_ALWAYS = True  # ← Поставь False, если хочешь использовать Supabase
+
 # ====== БАЗОВЫЕ НАСТРОЙКИ ======
 st.set_page_config(
     page_title="Система отслеживания и учёта картофеля",
@@ -19,7 +22,7 @@ st.set_page_config(
 SUPABASE_URL = st.secrets.get("SUPABASE_URL", os.getenv("SUPABASE_URL"))
 SUPABASE_ANON_KEY = st.secrets.get("SUPABASE_ANON_KEY", os.getenv("SUPABASE_ANON_KEY"))
 
-USE_SUPABASE = bool(SUPABASE_URL and SUPABASE_ANON_KEY)
+USE_SUPABASE = (not DEMO_ALWAYS) and bool(SUPABASE_URL and SUPABASE_ANON_KEY)
 _sb = None
 if USE_SUPABASE:
     try:
@@ -82,7 +85,7 @@ def _ensure_aware_utc(dt: datetime) -> datetime:
         return dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
 
-# ====== ЧТЕНИЕ ДАННЫХ ======
+# ====== ЧТЕНИЕ ДАННЫХ (если USE_SUPABASE=True) ======
 def fetch_events(point: Optional[str], start_dt: datetime, end_dt: datetime) -> pd.DataFrame:
     """Возвращает ts (naive UTC), point, potato_id, width_cm, height_cm."""
     if not USE_SUPABASE:
@@ -147,7 +150,12 @@ def bins_table(dfA: pd.DataFrame, dfB: pd.DataFrame) -> pd.DataFrame:
 
 # ====== ДЕМО-ДАННЫЕ ======
 def demo_generate(day: date, base: int = 620, jitter: int = 90, seed: int = 42):
-    """Красивый демо-поток: B ≈ 70–85% от A, ширины 25–75 см."""
+    """
+    Реалистичный демо-поток:
+      - A (вход) ~ N(base, jitter)
+      - B (собрано) = A * U(0.70, 0.85)
+      - width_cm ~ N(52..53, 7.5..8.5) c отсечением [25, 75]
+    """
     rng = random.Random(seed + int(day.strftime("%Y%m%d")))
     hours = [datetime.combine(day, time(h,0)) for h in range(24)]
     rowsA, rowsB = [], []
@@ -305,12 +313,14 @@ def page_dashboard_online():
 
     start = datetime.combine(day, time.min).replace(tzinfo=timezone.utc)
     end   = datetime.combine(day, time.max).replace(tzinfo=timezone.utc)
-    dfA = fetch_events("A", start, end) if USE_SUPABASE else pd.DataFrame()
-    dfB = fetch_events("B", start, end) if USE_SUPABASE else pd.DataFrame()
 
-    # Если БД пустая — подставляем демо-данные, чтобы графики/таблицы не были пустыми
-    if dfA.empty and dfB.empty:
+    if DEMO_ALWAYS:
         dfA, dfB = demo_generate(day)
+    else:
+        dfA = fetch_events("A", start, end)
+        dfB = fetch_events("B", start, end)
+        if dfA.empty and dfB.empty:
+            dfA, dfB = demo_generate(day)
 
     total_initial = dfA["potato_id"].nunique() if not dfA.empty else 0
     total_collected = dfB["potato_id"].nunique() if not dfB.empty else 0
@@ -324,7 +334,7 @@ def page_dashboard_online():
     st.markdown("### Поток по часам")
     render_hour_chart_grouped(dfA, dfB)
 
-    # Отступ перед таблицей, чтобы подпись оси X не накладывалась
+    # Отступ перед таблицей
     st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
 
     st.markdown("### Таблица по количеству")
@@ -353,14 +363,15 @@ def page_demo_from_videos():
     st.divider()
 
     st.markdown("#### Данные по роликам (за последние 2 часа)")
-    start_dt = datetime.now(timezone.utc) - timedelta(hours=2)
-    end_dt   = datetime.now(timezone.utc)
-    dfA = fetch_events("A", start_dt, end_dt)
-    dfB = fetch_events("B", start_dt, end_dt)
-
-    # Если пусто — демо за сегодня
-    if dfA.empty and dfB.empty:
+    if DEMO_ALWAYS:
         dfA, dfB = demo_generate(date.today())
+    else:
+        start_dt = datetime.now(timezone.utc) - timedelta(hours=2)
+        end_dt   = datetime.now(timezone.utc)
+        dfA = fetch_events("A", start_dt, end_dt)
+        dfB = fetch_events("B", start_dt, end_dt)
+        if dfA.empty and dfB.empty:
+            dfA, dfB = demo_generate(date.today())
 
     st.markdown("##### Поток по часам")
     render_hour_chart_grouped(dfA, dfB)
@@ -379,8 +390,12 @@ def page_app():
 
 # ====== MAIN ======
 def main():
-    # Если нет ключей Supabase — открываем приложение без авторизации
-    if not USE_SUPABASE:
+    # Если демо-режим — авторизация не нужна
+    if DEMO_ALWAYS:
+        st.session_state["authed"] = True
+        st.session_state["route"] = "app"
+
+    elif not USE_SUPABASE:
         st.session_state["authed"] = True
         st.session_state["route"] = "app"
 
