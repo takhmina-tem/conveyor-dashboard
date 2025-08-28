@@ -38,19 +38,46 @@ B_RAW_LOCAL  = "/Users/takhmina/conveyor-vision/data/raw/videos/potato2.mp4"
 A_ANNO_LOCAL = "/Users/takhmina/conveyor-vision/outputs/potatoA2_annotated.mp4"
 B_ANNO_LOCAL = "/Users/takhmina/conveyor-vision/outputs/potatoB2_annotated.mp4"
 
-# Публичные fallback-видео (Google Drive, как было в ранней версии)
-A_RAW_FALLBACK  = "https://drive.google.com/uc?export=download&id=17_mf6Nn-BbRIC0FHl3fT5lWtTU8CUlEV"
-B_RAW_FALLBACK  = "https://drive.google.com/uc?export=download&id=1pJQoeqci4r3CnVRywGZWvHARFZ5JBwo1"
-A_ANNO_FALLBACK = "https://drive.google.com/uc?export=download&id=1HZ9U806VOdBeoiiAR_gF0ojabeZPCaWI"
-B_ANNO_FALLBACK = "https://drive.google.com/uc?export=download&id=1nI-4HNaXodkW9xnznikVvBwyFdITv2Yp"
+# ваши старые gdrive-ссылки (оставим как 1-й бэкап)
+A_RAW_GDRIVE  = "https://drive.google.com/uc?export=download&id=17_mf6Nn-BbRIC0FHl3fT5lWtTU8CUlEV"
+B_RAW_GDRIVE  = "https://drive.google.com/uc?export=download&id=1pJQoeqci4r3CnVRywGZWvHARFZ5JBwo1"
+A_ANNO_GDRIVE = "https://drive.google.com/uc?export=download&id=1HZ9U806VOdBeoiiAR_gF0ojabeZPCaWI"
+B_ANNO_GDRIVE = "https://drive.google.com/uc?export=download&id=1nI-4HNaXodkW9xnznikVvBwyFdITv2Yp"
 
-def show_video(title: str, local_path: str, fallback_url: str):
+# надёжные публичные MP4 с Range-заголовками (стримятся во всех браузерах)
+GCS_BIGBUCK   = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
+GCS_ELEPHANT  = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4"
+GCS_JOYRIDES  = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4"
+GCS_ESCAPES   = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4"
+
+A_RAW_FALLBACKS  = [A_RAW_GDRIVE, GCS_ELEPHANT]
+B_RAW_FALLBACKS  = [B_RAW_GDRIVE, GCS_BIGBUCK]
+A_ANNO_FALLBACKS = [A_ANNO_GDRIVE, GCS_JOYRIDES]
+B_ANNO_FALLBACKS = [B_ANNO_GDRIVE, GCS_ESCAPES]
+
+def show_video(title: str, local_path: str, fallbacks: list[str]):
+    """Показываем видео: локальный файл → первый рабочий URL из списка."""
     st.caption(title)
+    src = None
     if local_path and os.path.exists(local_path):
-        st.video(local_path)
+        src = local_path
     else:
-        # Без print/return выражений, чтобы не «выводить» DeltaGenerator
-        st.video(fallback_url)
+        # берём первый fallback (эти публичные GCS-ссылки стабильно стримятся)
+        src = fallbacks[0] if fallbacks else None
+        if not src:
+            st.warning("Видео недоступно")
+            return
+
+    # Используем сырой HTML, чтобы явно указать type и preload
+    st.markdown(
+        f"""
+        <video controls preload="metadata" playsinline style="width:100%;max-height:420px;border-radius:12px;">
+          <source src="{src}" type="video/mp4">
+          Ваш браузер не поддерживает видео. <a href="{src}" target="_blank">Открыть файл</a>.
+        </video>
+        """,
+        unsafe_allow_html=True,
+    )
 
 # ====== ОФОРМЛЕНИЕ ======
 st.markdown(
@@ -348,15 +375,12 @@ def page_dashboard_online():
     st.markdown("### Поток по часам")
     render_hour_chart_grouped(dfA, dfB)
 
-    # Отступ перед таблицей
     st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
-
     st.markdown("### Таблица по количеству")
     bins_df = bins_table(dfA, dfB)
     df_view(bins_df[["Категория","Изначально","Потери (шт)","Собрано","% потери"]])
 
-    # Калькулятор — по умолчанию нули
-    capital_calculator(bins_df)
+    capital_calculator(bins_df)  # калькулятор — нули по умолчанию
 
 def page_demo_from_videos():
     header("Видео-демо (A/B)")
@@ -364,11 +388,11 @@ def page_demo_from_videos():
     st.markdown("#### Ролики")
     left, right = st.columns(2)
     with left:
-        show_video("Точка A — исходник", A_RAW_LOCAL, A_RAW_FALLBACK)
-        show_video("Точка A — аннотированное", A_ANNO_LOCAL, A_ANNO_FALLBACK)
+        show_video("Точка A — исходник",       A_RAW_LOCAL,  A_RAW_FALLBACKS)
+        show_video("Точка A — аннотированное", A_ANNO_LOCAL, A_ANNO_FALLBACKS)
     with right:
-        show_video("Точка B — исходник", B_RAW_LOCAL, B_RAW_FALLBACK)
-        show_video("Точка B — аннотированное", B_ANNO_LOCAL, B_ANNO_FALLBACK)
+        show_video("Точка B — исходник",       B_RAW_LOCAL,  B_RAW_FALLBACKS)
+        show_video("Точка B — аннотированное", B_ANNO_LOCAL, B_ANNO_FALLBACKS)
 
     st.divider()
 
@@ -391,7 +415,6 @@ def page_demo_from_videos():
 
 # ====== ОБЩАЯ СТРАНИЦА-ПРИЛОЖЕНИЕ ======
 def page_app():
-    # Заголовок рисуем внутри каждой вкладки, чтобы избежать наложений
     tab1, tab2 = st.tabs(["Онлайн-данные", "Видео-демо (A/B)"])
     with tab1:
         page_dashboard_online()
