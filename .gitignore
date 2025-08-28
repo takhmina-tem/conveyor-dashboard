@@ -221,3 +221,11 @@ config.json
 *.mkv
 data/
 outputs/
+
+
+streamlit
+supabase
+python-dotenv
+pandas
+altair
+
