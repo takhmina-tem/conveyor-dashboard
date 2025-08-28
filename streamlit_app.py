@@ -35,9 +35,21 @@ B_RAW  = "https://drive.google.com/uc?export=download&id=1pJQoeqci4r3CnVRywGZWvH
 A_ANNO = "https://drive.google.com/uc?export=download&id=1HZ9U806VOdBeoiiAR_gF0ojabeZPCaWI"
 B_ANNO = "https://drive.google.com/uc?export=download&id=1nI-4HNaXodkW9xnznikVvBwyFdITv2Yp"
 
-# ====== ОФОРМЛЕНИЕ ======
+# ====== ОФОРМЛЕНИЕ (улучшена видимость вкладок) ======
 st.markdown(
-    "<style>.block-container{padding-top:1.2rem}.hdr{display:flex;justify-content:space-between;align-items:center}.hdr h1{margin:0;font-size:26px;font-weight:800;letter-spacing:.3px}hr{margin:8px 0 16px 0;opacity:.25}div[aria-live='polite']{display:none!important}</style>",
+    """
+    <style>
+      .block-container { padding-top: .6rem; }
+      .hdr { display:flex; justify-content:space-between; align-items:center }
+      .hdr h1 { margin:0; font-size:26px; font-weight:800; letter-spacing:.3px }
+      hr { margin:8px 0 16px 0; opacity:.25 }
+      /* не скрываем табы */
+      .stTabs { margin-top: .2rem !important; }
+      .stTabs [data-baseweb="tab-list"] { overflow-x: auto; }
+      /* скрыть служебные live-элементы спиннеров */
+      div[aria-live='polite']{ display:none!important }
+    </style>
+    """,
     unsafe_allow_html=True,
 )
 
@@ -137,15 +149,15 @@ def bins_table(dfA: pd.DataFrame, dfB: pd.DataFrame) -> pd.DataFrame:
 
     A = count_bins(dfA)  # Изначально (точка A)
     B = count_bins(dfB)  # Собрано   (точка B)
-    discarded = (A - B).clip(lower=0)
-    loss_pct = pd.Series({c: (0.0 if A[c]==0 else round(discarded[c]/A[c]*100, 1)) for c in CATEGORIES})
+    losses = (A - B).clip(lower=0)
+    loss_pct = pd.Series({c: (0.0 if A[c]==0 else round(losses[c]/A[c]*100, 1)) for c in CATEGORIES})
 
     return pd.DataFrame({
-        "Категория":   CATEGORIES,
-        "Собрано":     [int(B[c]) for c in CATEGORIES],
-        "Изначально":  [int(A[c]) for c in CATEGORIES],
-        "Выброшено":   [int(discarded[c]) for c in CATEGORIES],
-        "% потери":    [float(loss_pct[c]) for c in CATEGORIES],
+        "Категория":    CATEGORIES,
+        "Изначально":   [int(A[c])      for c in CATEGORIES],
+        "Потери (шт)":  [int(losses[c]) for c in CATEGORIES],
+        "Собрано":      [int(B[c])      for c in CATEGORIES],
+        "% потери":     [float(loss_pct[c]) for c in CATEGORIES],
     })
 
 # ====== ДЕМО-ДАННЫЕ ======
@@ -167,7 +179,7 @@ def demo_generate(day: date, base: int = 600, jitter: int = 120, seed: int = 42)
             pid += 1
     return pd.DataFrame(rowsA), pd.DataFrame(rowsB)
 
-# ====== СТРАНИЦЫ ======
+# ====== ЛОГИН ======
 def page_login():
     header("Авторизация")
     st.subheader("Вход в систему")
@@ -189,34 +201,27 @@ def page_login():
         if ok:
             st.session_state["authed"] = True
             go("app")
-    # Только эта строка должна оставаться
     st.caption("Доступ выдаётся администраторами.")
+
+# ====== ЧАРТ ПО ЧАСАМ ======
 def render_hour_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame):
-    """Строит единый бар-чарт: Изначально (A) vs Собрано (B) по часам."""
-    # Посчитать по часам
+    """Единый бар-чарт: Изначально (A) vs Собрано (B) по часам."""
     ha = hour_counts(dfA).rename(columns={"count": "initial"})   # A = Изначально
     hb = hour_counts(dfB).rename(columns={"count": "collected"}) # B = Собрано
-
-    # Свести в одну таблицу по всем часам
     merged = pd.merge(ha, hb, on="hour", how="outer").sort_values("hour")
     if merged.empty:
         st.info("Нет данных за выбранный период.")
         return
-
     merged[["initial", "collected"]] = merged[["initial", "collected"]].fillna(0).astype(int)
-
-    # Преобразуем в «длинный» формат для Altair
     long_df = merged.melt(
         id_vars="hour",
         value_vars=["initial", "collected"],
         var_name="kind",
         value_name="value"
     )
-    # Переименуем подписи на графике
     kind_map = {"initial": "Изначально", "collected": "Собрано"}
     long_df["Тип"] = long_df["kind"].map(kind_map)
     long_df = long_df.drop(columns=["kind"]).rename(columns={"value": "Значение"})
-
     chart = (
         alt.Chart(long_df)
         .mark_bar()
@@ -234,82 +239,76 @@ def render_hour_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame):
     )
     st.altair_chart(chart, use_container_width=True)
 
-
+# ====== КАЛЬКУЛЯТОР КАПИТАЛА (в тг) ======
 def capital_calculator(bins_df: pd.DataFrame):
     st.markdown("### Калькулятор капитала")
-    st.caption("Задайте цену за единицу для каждой категории. Подсчёт ведётся по столбцу «Собрано».")
+    st.caption("Задайте цену за единицу для каждой категории (тг/шт). Подсчёт ведётся по столбцу «Собрано».")
     counts = dict(zip(bins_df["Категория"], bins_df["Собрано"]))
-
     cols = st.columns(5)
     default_prices = {"<30": 0.0, "30–40": 0.2, "40–50": 0.25, "50–60": 0.3, ">60": 0.35}
     prices = {}
     for i, cat in enumerate(CATEGORIES):
         with cols[i]:
-            prices[cat] = st.number_input(f"Цена ({cat})", min_value=0.0, step=0.01, value=default_prices.get(cat, 0.0), key=f"price_{cat}")
+            prices[cat] = st.number_input(f"Цена ({cat}), тг/шт", min_value=0.0, step=0.01,
+                                          value=default_prices.get(cat, 0.0), key=f"price_{cat}")
 
-    # Подсчёты
     subtotals = {cat: float(counts.get(cat, 0)) * float(prices.get(cat, 0.0)) for cat in CATEGORIES}
     total = round(sum(subtotals.values()), 2)
 
-    # Вывод
     calc_df = pd.DataFrame({
-        "Категория": CATEGORIES,
-        "Собрано (шт)": [int(counts.get(c, 0)) for c in CATEGORIES],
-        "Цена за шт":   [prices[c] for c in CATEGORIES],
-        "Сумма":        [round(subtotals[c], 2) for c in CATEGORIES],
+        "Категория":      CATEGORIES,
+        "Собрано (шт)":   [int(counts.get(c, 0)) for c in CATEGORIES],
+        "Цена, тг/шт":    [prices[c] for c in CATEGORIES],
+        "Сумма, тг":      [round(subtotals[c], 2) for c in CATEGORIES],
     })
     df_view(calc_df)
-    st.subheader(f"Итого капитал: **{total}**")
+    st.subheader(f"Итого капитал: **{total:,.2f} тг**".replace(",", " "))
 
+# ====== ГЛАВНАЯ ВКЛАДКА ======
 def page_dashboard_online():
     header()
 
-    c1, c2, c3 = st.columns([1.2,1,1])
-    with c1:
+    # ---- Верхние метрики: Изначально / Потери / Собрано ----
+    c_top1, c_top2, c_top3 = st.columns([1.2,1,1])
+    with c_top1:
         day = st.date_input("Дата", value=date.today())
-    with c2:
+    with c_top2:
         pass
-    with c3:
+    with c_top3:
         if st.button("Выйти"):
             st.session_state["authed"] = False
             go("login")
 
     # Источник данных:
-    # - если есть Supabase и данные за день → берем их,
-    # - иначе генерируем демо.
     start = datetime.combine(day, time.min).replace(tzinfo=timezone.utc)
     end   = datetime.combine(day, time.max).replace(tzinfo=timezone.utc)
 
     dfA = fetch_events("A", start, end) if USE_SUPABASE else pd.DataFrame()
     dfB = fetch_events("B", start, end) if USE_SUPABASE else pd.DataFrame()
-
     if (dfA.empty and dfB.empty):
         dfA, dfB = demo_generate(day)
 
-    # ----- Поток по часам (групповой бар-чарт: Изначально vs Собрано) -----
+    # ---- Метрики в самом верху (по запросу): Изначально / Потери / Собрано ----
+    total_initial = dfA["potato_id"].nunique() if not dfA.empty else 0
+    total_collected = dfB["potato_id"].nunique() if not dfB.empty else 0
+    total_losses = max(0, total_initial - total_collected)
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Изначально (шт)", value=f"{total_initial}")
+    m2.metric("Потери (шт)", value=f"{total_losses}")
+    m3.metric("Собрано (шт)", value=f"{total_collected}")
+
+    # ---- Поток по часам (общий чарт с 2 цветами) ----
     st.markdown("### Поток по часам")
     render_hour_chart_grouped(dfA, dfB)
 
-    # ----- Таблица по количеству -----
+    # ---- Таблица по количеству (переупорядоченные колонки) ----
     st.markdown("### Таблица по количеству")
     bins_df = bins_table(dfA, dfB)
-    df_view(bins_df)
+    df_view(bins_df[["Категория","Изначально","Потери (шт)","Собрано","% потери"]])
 
-    # ----- Калькулятор капитала -----
+    # ---- Калькулятор капитала (тг) ----
     capital_calculator(bins_df)
-
-    # ----- Индикаторы внизу -----
-    st.divider()
-    total_A = dfA["potato_id"].nunique() if not dfA.empty else 0
-    total_B = dfB["potato_id"].nunique() if not dfB.empty else 0
-    losses_pct = (0.0 if total_A == 0 else round((total_A - total_B) / total_A * 100, 1))
-
-    avg_size = round(float(dfB["width_cm"].mean()), 1) if ("width_cm" in dfB.columns and not dfB["width_cm"].empty) else 0.0
-
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Собрано сегодня (шт)", value=f"{total_B}")
-    m2.metric("Средний размер (см)", value=f"{avg_size}")
-    m3.metric("Потери", value=f"{losses_pct} %")
 
 def page_demo_from_videos():
     header("Видео-демо (A/B)")
@@ -329,7 +328,6 @@ def page_demo_from_videos():
 
     st.divider()
 
-    # Пример простого просмотра распределения за интервал (если есть данные в БД)
     st.markdown("#### Данные по роликам (если есть события в БД)")
     start_dt = datetime.now(timezone.utc) - timedelta(hours=2)
     end_dt   = datetime.now(timezone.utc)
@@ -344,10 +342,11 @@ def page_demo_from_videos():
     render_hour_chart_grouped(dfA, dfB)
 
     st.markdown("##### Таблица по количеству")
-    df_view(bins_table(dfA, dfB))
+    df_view(bins_table(dfA, dfB)[["Категория","Изначально","Потери (шт)","Собрано","% потери"]])
 
 # ====== ОБЩАЯ СТРАНИЦА-ПРИЛОЖЕНИЕ ======
 def page_app():
+    # табы наверху экрана, хедер внутри вкладок — чтобы сами вкладки всегда были видны
     tab1, tab2 = st.tabs(["Онлайн-данные", "Видео-демо (A/B)"])
     with tab1:
         page_dashboard_online()
