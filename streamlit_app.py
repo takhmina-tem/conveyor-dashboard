@@ -15,7 +15,7 @@ st.set_page_config(
     layout="wide",
 )
 
-# ====== КЛЮЧИ (через Streamlit Secrets или env) ======
+# ====== КЛЮЧИ (через .streamlit/secrets.toml или env) ======
 SUPABASE_URL = st.secrets.get("SUPABASE_URL", os.getenv("SUPABASE_URL"))
 SUPABASE_ANON_KEY = st.secrets.get("SUPABASE_ANON_KEY", os.getenv("SUPABASE_ANON_KEY"))
 
@@ -29,33 +29,27 @@ if USE_SUPABASE:
         st.warning(f"Не удалось инициализировать Supabase: {e}")
         USE_SUPABASE = False
 
-# ====== ВИДЕО-ПУТИ (Google Drive) ======
-A_RAW  = "https://drive.google.com/uc?export=download&id=17_mf6Nn-BbRIC0FHl3fT5lWtTU8CUlEV"
-B_RAW  = "https://drive.google.com/uc?export=download&id=1pJQoeqci4r3CnVRywGZWvHARFZ5JBwo1"
-A_ANNO = "https://drive.google.com/uc?export=download&id=1HZ9U806VOdBeoiiAR_gF0ojabeZPCaWI"
-B_ANNO = "https://drive.google.com/uc?export=download&id=1nI-4HNaXodkW9xnznikVvBwyFdITv2Yp"
+# ====== ВИДЕО-ПУТИ (локальные файлы) ======
+A_RAW  = "/Users/takhmina/conveyor-vision/data/raw/videos/potato1.mp4"
+B_RAW  = "/Users/takhmina/conveyor-vision/data/raw/videos/potato2.mp4"
+A_ANNO = "/Users/takhmina/conveyor-vision/outputs/potatoA2_annotated.mp4"
+B_ANNO = "/Users/takhmina/conveyor-vision/outputs/potatoB2_annotated.mp4"
 
 # ====== ОФОРМЛЕНИЕ ======
 st.markdown(
     """
     <style>
-      /* Чуть больше отступ сверху, чтобы шапка не "резалась" */
       .block-container { padding-top: 2.25rem; }
-
-      /* Шапка */
       .hdr { display:flex; justify-content:space-between; align-items:center; }
       .hdr h1 { margin:0; font-size:26px; font-weight:800; letter-spacing:.3px; }
+      .hdr .sub { opacity:.8 }
       .hdr + .spacer { height: 10px; }
-
-      /* Разделитель после шапки с адекватным отступом */
       hr { margin: 10px 0 22px 0; opacity:.25; }
-
-      /* Вкладки всегда видны и не налезают */
       .stTabs { margin-top: .6rem !important; }
       .stTabs [data-baseweb="tab-list"] { overflow-x: auto; }
-
-      /* Чуть больше вертикальных отступов у блоков ввода, чтобы подписи не "задирались" */
       .stDateInput, .stNumberInput, .stTextInput { margin-bottom: .35rem; }
+      /* скрыть служебные ARIA-уведомления, чтобы ничего не "подпрыгивало" */
+      div[aria-live='polite']{display:none!important}
     </style>
     """,
     unsafe_allow_html=True,
@@ -63,29 +57,16 @@ st.markdown(
 
 def header(sub: str | None = None):
     st.markdown(
-        '<div class="hdr"><h1>Система отслеживания и учёта картофеля</h1></div>',
+        f"<div class='hdr'><h1>Система отслеживания и учёта картофеля</h1>{f'<div class=\"sub\">{sub}</div>' if sub else ''}</div>",
         unsafe_allow_html=True
     )
     st.markdown('<div class="spacer"></div>', unsafe_allow_html=True)
     st.markdown("<hr/>", unsafe_allow_html=True)
-    if sub:
-        st.caption(sub)
 
 def df_view(df: pd.DataFrame, caption: str = ""):
     if caption:
         st.caption(caption)
     st.dataframe(df, use_container_width=True)
-
-def video_player(url: str):
-    st.markdown(
-        f"""
-        <video width="100%" controls>
-          <source src="{url}" type="video/mp4">
-          Ваш браузер не поддерживает видео.
-        </video>
-        """,
-        unsafe_allow_html=True,
-    )
 
 # ====== СЕССИЯ/РОУТЕР ======
 if "authed" not in st.session_state:
@@ -136,7 +117,7 @@ def hour_counts(df: pd.DataFrame) -> pd.DataFrame:
           .agg(count=("potato_id", "nunique"))
     )
 
-# ====== ТАБЛИЧНЫЕ КАТЕГОРИИ ======
+# ====== КАТЕГОРИИ ======
 CATEGORIES = ["<30", "30–40", "40–50", "50–60", ">60"]
 
 def bins_table(dfA: pd.DataFrame, dfB: pd.DataFrame) -> pd.DataFrame:
@@ -153,8 +134,8 @@ def bins_table(dfA: pd.DataFrame, dfB: pd.DataFrame) -> pd.DataFrame:
         vc = cut.value_counts().reindex(labels).fillna(0).astype(int)
         return vc
 
-    A = count_bins(dfA)   # Изначально (A) — вход
-    B = count_bins(dfB)   # Собрано   (B) — итог
+    A = count_bins(dfA)   # Изначально (A)
+    B = count_bins(dfB)   # Собрано   (B)
     losses = (A - B).clip(lower=0)
     loss_pct = pd.Series({c: (0.0 if A[c]==0 else round(losses[c]/A[c]*100, 1)) for c in CATEGORIES})
 
@@ -175,7 +156,6 @@ def demo_generate(day: date, base: int = 620, jitter: int = 90, seed: int = 42):
     pid = 1
     for ts in hours:
         countA = max(0, int(rng.gauss(base, jitter)))
-        # собранное — 70..85% от входа, чтобы «Потери» выглядели реалистично
         countB = int(countA * rng.uniform(0.70, 0.85))
         for _ in range(countA):
             width = max(25.0, min(75.0, rng.gauss(52.0, 8.5)))
@@ -194,7 +174,6 @@ def page_login():
         email = st.text_input("E-mail", placeholder="you@company.com")
         password = st.text_input("Пароль", type="password", placeholder="••••••••")
         submitted = st.form_submit_button("Войти")
-
     if submitted:
         ok = True
         if USE_SUPABASE:
@@ -210,12 +189,10 @@ def page_login():
             st.session_state["authed"] = True
             st.session_state["route"] = "app"
             st.rerun()
-
     st.caption("Доступ выдаётся администраторами.")
 
-# ====== ЧАРТ ПО ЧАСАМ ======
+# ====== ЧАРТ ПО ЧАСАМ (A vs B) ======
 def render_hour_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame):
-    """Единый бар-чарт: Изначально (A) vs Собрано (B) по часам."""
     ha = hour_counts(dfA).rename(columns={"count": "initial"})   # A = Изначально
     hb = hour_counts(dfB).rename(columns={"count": "collected"}) # B = Собрано
     merged = pd.merge(ha, hb, on="hour", how="outer").sort_values("hour")
@@ -239,78 +216,56 @@ def render_hour_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame):
             x=alt.X("hour:T", title="Дата и час"),
             y=alt.Y("Значение:Q", title="Количество"),
             color=alt.Color("Тип:N", title=""),
-            tooltip=[
-                alt.Tooltip("hour:T", title="Час"),
-                alt.Tooltip("Тип:N"),
-                alt.Tooltip("Значение:Q")
-            ],
+            tooltip=[alt.Tooltip("hour:T", title="Час"), alt.Tooltip("Тип:N"), alt.Tooltip("Значение:Q")],
         )
         .properties(height=320)
     )
     st.altair_chart(chart, use_container_width=True)
 
-# ====== КАЛЬКУЛЯТОР КАПИТАЛА (по умолчанию без ручного ввода) ======
+# ====== КАЛЬКУЛЯТОР КАПИТАЛА (поля сразу на странице) ======
 DEFAULT_WEIGHT_G = {"<30": 80.0, "30–40": 150.0, "40–50": 220.0, "50–60": 300.0, ">60": 380.0}
 DEFAULT_PRICE_KG = {"<30": 0.0,  "30–40": 120.0, "40–50": 150.0, "50–60": 180.0, ">60": 200.0}
 
 def capital_calculator(bins_df: pd.DataFrame):
     st.markdown("### Калькулятор капитала")
-    st.caption("Расчёт по столбцу «Собрано». Значения по умолчанию можно изменить в настройках ниже.")
 
     counts = dict(zip(bins_df["Категория"], bins_df["Собрано"]))
 
-    # Расчёт по умолчанию
-    kg_totals = {cat: (counts.get(cat, 0) * DEFAULT_WEIGHT_G.get(cat, 0.0)) / 1000.0 for cat in CATEGORIES}
-    subtotals = {cat: kg_totals[cat] * DEFAULT_PRICE_KG.get(cat, 0.0) for cat in CATEGORIES}
+    col_w = st.columns(5)
+    col_p = st.columns(5)
+    weights_g = {}
+    prices_kg = {}
+
+    for i, cat in enumerate(CATEGORIES):
+        with col_w[i]:
+            weights_g[cat] = st.number_input(
+                f"Вес ({cat}), г/шт", min_value=0.0, step=10.0,
+                value=DEFAULT_WEIGHT_G.get(cat, 0.0), key=f"w_{cat}"
+            )
+        with col_p[i]:
+            prices_kg[cat] = st.number_input(
+                f"Цена ({cat}), тг/кг", min_value=0.0, step=10.0,
+                value=DEFAULT_PRICE_KG.get(cat, 0.0), key=f"p_{cat}"
+            )
+
+    kg_totals = {cat: (counts.get(cat, 0) * weights_g.get(cat, 0.0)) / 1000.0 for cat in CATEGORIES}
+    subtotals = {cat: kg_totals[cat] * prices_kg.get(cat, 0.0) for cat in CATEGORIES}
     total_sum = round(sum(subtotals.values()), 2)
 
     calc_df = pd.DataFrame({
         "Категория":        CATEGORIES,
         "Собрано (шт)":     [int(counts.get(c, 0)) for c in CATEGORIES],
-        "Вес, г/шт":        [DEFAULT_WEIGHT_G[c] for c in CATEGORIES],
+        "Вес, г/шт":        [weights_g[c] for c in CATEGORIES],
         "Итого, кг":        [round(kg_totals[c], 3) for c in CATEGORIES],
-        "Цена, тг/кг":      [DEFAULT_PRICE_KG[c] for c in CATEGORIES],
+        "Цена, тг/кг":      [prices_kg[c] for c in CATEGORIES],
         "Сумма, тг":        [round(subtotals[c], 2) for c in CATEGORIES],
     })
     df_view(calc_df)
     st.subheader(f"Итого капитал: **{total_sum:,.2f} тг**".replace(",", " "))
 
-    # Опциональные ручные настройки
-    with st.expander("Доп. настройки (изменить веса/цены)", expanded=False):
-        col_w = st.columns(5)
-        col_p = st.columns(5)
-        weights_g = {}
-        prices_kg = {}
-        for i, cat in enumerate(CATEGORIES):
-            with col_w[i]:
-                weights_g[cat] = st.number_input(
-                    f"Вес ({cat}), г/шт", min_value=0.0, step=10.0,
-                    value=DEFAULT_WEIGHT_G.get(cat, 0.0), key=f"w_{cat}"
-                )
-            with col_p[i]:
-                prices_kg[cat] = st.number_input(
-                    f"Цена ({cat}), тг/кг", min_value=0.0, step=10.0,
-                    value=DEFAULT_PRICE_KG.get(cat, 0.0), key=f"p_{cat}"
-                )
-        if st.button("Пересчитать"):
-            kg_totals2 = {cat: (counts.get(cat, 0) * weights_g.get(cat, 0.0)) / 1000.0 for cat in CATEGORIES}
-            subtotals2 = {cat: kg_totals2[cat] * prices_kg.get(cat, 0.0) for cat in CATEGORIES}
-            total_sum2 = round(sum(subtotals2.values()), 2)
-            calc_df2 = pd.DataFrame({
-                "Категория":        CATEGORIES,
-                "Собрано (шт)":     [int(counts.get(c, 0)) for c in CATEGORIES],
-                "Вес, г/шт":        [weights_g[c] for c in CATEGORIES],
-                "Итого, кг":        [round(kg_totals2[c], 3) for c in CATEGORIES],
-                "Цена, тг/кг":      [prices_kg[c] for c in CATEGORIES],
-                "Сумма, тг":        [round(subtotals2[c], 2) for c in CATEGORIES],
-            })
-            df_view(calc_df2, "Результат по изменённым параметрам")
-            st.subheader(f"Итого капитал: **{total_sum2:,.2f} тг**".replace(",", " "))
-
 # ====== ГЛАВНАЯ ВКЛАДКА ======
 def page_dashboard_online():
-    # Шапка над вкладками уже есть, добавим небольшой отступ перед контентом
-    st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
+    header("Онлайн-данные")
 
     c_top1, c_top2, c_top3 = st.columns([1.3,1,1])
     with c_top1:
@@ -322,20 +277,17 @@ def page_dashboard_online():
             st.session_state["authed"] = False
             go("login")
 
-    # Чуть больше воздуха под строкой с датой
     st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
 
-    # Источник данных
     start = datetime.combine(day, time.min).replace(tzinfo=timezone.utc)
     end   = datetime.combine(day, time.max).replace(tzinfo=timezone.utc)
     dfA = fetch_events("A", start, end) if USE_SUPABASE else pd.DataFrame()
     dfB = fetch_events("B", start, end) if USE_SUPABASE else pd.DataFrame()
 
-    # Автодемо как в «красивой» версии: если записей нет — рисуем демо
+    # Всегда заполняем демо-данными, если пусто
     if (dfA.empty and dfB.empty):
         dfA, dfB = demo_generate(day)
 
-    # Метрики (Изначально / Потери / Собрано)
     total_initial = dfA["potato_id"].nunique() if not dfA.empty else 0
     total_collected = dfB["potato_id"].nunique() if not dfB.empty else 0
     total_losses = max(0, total_initial - total_collected)
@@ -352,34 +304,35 @@ def page_dashboard_online():
     bins_df = bins_table(dfA, dfB)
     df_view(bins_df[["Категория","Изначально","Потери (шт)","Собрано","% потери"]])
 
-    # Калькулятор капитала (тг, цена/кг) — сразу считает по дефолту
     capital_calculator(bins_df)
 
 def page_demo_from_videos():
+    header("Видео-демо (A/B)")
+
     st.markdown("#### Ролики")
     left, right = st.columns(2)
     with left:
         st.caption("Точка A — исходник")
-        video_player(A_RAW)
+        st.video(A_RAW) if os.path.exists(A_RAW) else st.warning(f"Файл не найден: {A_RAW}")
         st.caption("Точка A — аннотированное")
-        video_player(A_ANNO)
+        st.video(A_ANNO) if os.path.exists(A_ANNO) else st.warning(f"Файл не найден: {A_ANNO}")
     with right:
         st.caption("Точка B — исходник")
-        video_player(B_RAW)
+        st.video(B_RAW) if os.path.exists(B_RAW) else st.warning(f"Файл не найден: {B_RAW}")
         st.caption("Точка B — аннотированное")
-        video_player(B_ANNO)
+        st.video(B_ANNO) if os.path.exists(B_ANNO) else st.warning(f"Файл не найден: {B_ANNO}")
 
     st.divider()
 
-    st.markdown("#### Данные по роликам (если есть события в БД)")
+    st.markdown("#### Данные по роликам (за последние 2 часа)")
     start_dt = datetime.now(timezone.utc) - timedelta(hours=2)
     end_dt   = datetime.now(timezone.utc)
     dfA = fetch_events("A", start_dt, end_dt)
     dfB = fetch_events("B", start_dt, end_dt)
 
+    # Если пусто — подставим демо за сегодня, чтобы графики не были пустыми
     if dfA.empty and dfB.empty:
-        st.info("Данных за интервал нет или БД не подключена.")
-        return
+        dfA, dfB = demo_generate(date.today())
 
     st.markdown("##### Поток по часам")
     render_hour_chart_grouped(dfA, dfB)
@@ -389,8 +342,7 @@ def page_demo_from_videos():
 
 # ====== ОБЩАЯ СТРАНИЦА-ПРИЛОЖЕНИЕ ======
 def page_app():
-    # Заголовок ВНЕ табов — чтобы вкладки и верстка были стабильными
-    header()
+    # Заголовок рисуем внутри каждой вкладки, чтобы избежать наложений
     tab1, tab2 = st.tabs(["Онлайн-данные", "Видео-демо (A/B)"])
     with tab1:
         page_dashboard_online()
@@ -408,12 +360,10 @@ def main():
     authed = st.session_state.get("authed", False)
 
     if route == "login" and USE_SUPABASE and not authed:
-        # Рисуем ОДНУ шапку здесь
         header("Авторизация")
         page_login()
         return
 
-    # Иначе — само приложение
     page_app()
 
 if __name__ == "__main__":
