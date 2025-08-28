@@ -201,7 +201,6 @@ def render_hour_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame):
     merged[["initial", "collected"]] = merged[["initial", "collected"]].fillna(0).astype(int)
     merged["diff"] = (merged["initial"] - merged["collected"]).clip(lower=0)
 
-    # Готовим long-формат для стекования
     long_df = pd.concat([
         merged[["hour", "collected"]].rename(columns={"collected": "Значение"}).assign(Сегмент="Итого (B)"),
         merged[["hour", "diff"]].rename(columns={"diff": "Значение"}).assign(Сегмент="Изначально (A)"),
@@ -210,12 +209,7 @@ def render_hour_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame):
     x_axis = alt.X(
         "hour:T",
         title="Дата и час",
-        axis=alt.Axis(
-            titlePadding=24,
-            labelOverlap=True,
-            labelFlush=True,
-            titleAnchor="start"
-        ),
+        axis=alt.Axis(titlePadding=24, labelOverlap=True, labelFlush=True, titleAnchor="start"),
     )
 
     chart = (
@@ -235,33 +229,25 @@ def render_hour_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame):
                 alt.Tooltip("Значение:Q", title="В сегменте"),
             ],
         )
-        .properties(
-            height=320,
-            padding={"top": 10, "right": 12, "bottom": 44, "left": 8}
-        )
-        .configure_axis(
-            labelFontSize=12,
-            titleFontSize=12,
-        )
+        .properties(height=320, padding={"top": 10, "right": 12, "bottom": 44, "left": 8})
+        .configure_axis(labelFontSize=12, titleFontSize=12)
     )
 
     st.altair_chart(chart, use_container_width=True)
     st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
 
-# ====== КАЛЬКУЛЯТОР КАПИТАЛА (текстовый ввод, плейсхолдер "0") ======
-DEFAULT_WEIGHT_G = {"<30": 0.0, "30–40": 0.0, "40–50": 0.0, "50–60": 0.0, ">60": 0.0}
-DEFAULT_PRICE_KG = {"<30": 0.0, "30–40": 0.0, "40–50": 0.0, "50–60": 0.0, ">60": 0.0}
-
-def _parse_float(s: str) -> float:
-    if s is None:
+# ====== КАЛЬКУЛЯТОР КАПИТАЛА (текстовый ввод, placeholder "0") ======
+def _parse_float(s: Optional[str]) -> float:
+    if not s:
         return 0.0
     s = s.strip().replace(",", ".")
-    if s == "":
-        return 0.0
     try:
         return float(s)
     except:
         return 0.0
+
+DEFAULT_WEIGHT_G = {"<30": 0.0, "30–40": 0.0, "40–50": 0.0, "50–60": 0.0, ">60": 0.0}
+DEFAULT_PRICE_KG = {"<30": 0.0, "30–40": 0.0, "40–50": 0.0, "50–60": 0.0, ">60": 0.0}
 
 def capital_calculator(bins_df: pd.DataFrame):
     st.markdown("### Калькулятор капитала")
@@ -273,25 +259,23 @@ def capital_calculator(bins_df: pd.DataFrame):
     weights_g = {}
     prices_kg = {}
 
-    # Текстовый ввод: виден «серый» 0 (placeholder), но поле пустое — можно просто печатать
     for i, cat in enumerate(CATEGORIES):
         with col_w[i]:
+            # без value=..., только key + placeholder
             raw_w = st.text_input(
                 f"Вес ({cat}), г/шт",
-                value=st.session_state.get(f"calc_w_{cat}", ""),
-                placeholder="0",
                 key=f"calc_w_{cat}",
+                placeholder="0",
             )
-            weights_g[cat] = _parse_float(raw_w)
+            weights_g[cat] = _parse_float(raw_w) if raw_w is not None else DEFAULT_WEIGHT_G[cat]
 
         with col_p[i]:
             raw_p = st.text_input(
                 f"Цена ({cat}), тг/кг",
-                value=st.session_state.get(f"calc_p_{cat}", ""),
-                placeholder="0",
                 key=f"calc_p_{cat}",
+                placeholder="0",
             )
-            prices_kg[cat] = _parse_float(raw_p)
+            prices_kg[cat] = _parse_float(raw_p) if raw_p is not None else DEFAULT_PRICE_KG[cat]
 
     kg_totals = {cat: (counts.get(cat, 0) * weights_g.get(cat, 0.0)) / 1000.0 for cat in CATEGORIES}
     subtotals = {cat: kg_totals[cat] * prices_kg.get(cat, 0.0) for cat in CATEGORIES}
