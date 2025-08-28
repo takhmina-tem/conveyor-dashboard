@@ -300,7 +300,6 @@ def page_dashboard_online():
     st.markdown("### Поток по часам")
     render_hour_chart_grouped(dfA, dfB)
     
-    st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
     st.markdown("### Таблица по количеству")
     bins_df = bins_table(dfA, dfB)
     df_view(bins_df[["Категория","Изначально","Потери (шт)","Собрано","% потери"]])
