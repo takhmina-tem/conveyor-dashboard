@@ -191,36 +191,31 @@ def page_login():
             go("app")
     # Только эта строка должна оставаться
     st.caption("Доступ выдаётся администраторами.")
-
 def render_hour_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame):
-    # Агрегируем поминутно -> по часам
-    ha = hour_counts(dfA).rename(columns={"count":"initial"})
-    hb = hour_counts(dfB).rename(columns={"count":"collected"})
-    hours = pd.date_range(
-        start=(min([ha["hour"].min(), hb["hour"].min()] + [datetime.combine(date.today(), time(0,0))]) if not ha.empty or not hb.empty else datetime.combine(date.today(), time(0,0))),
-        end=(max([ha["hour"].max(), hb["hour"].max()] + [datetime.combine(date.today(), time(23,0))]) if not ha.empty or not hb.empty else datetime.combine(date.today(), time(23,0))),
-        freq="H"
-    )
-    base = pd.DataFrame({"hour": hours})
-    merged = base.merge(ha, on="hour", how="left").merge(hb, on="hour", how="left")
-    merged[["initial","collected"]] = merged[["initial","collected"]].fillna(0).astype(int)
+    """Строит единый бар-чарт: Изначально (A) vs Собрано (B) по часам."""
+    # Посчитать по часам
+    ha = hour_counts(dfA).rename(columns={"count": "initial"})   # A = Изначально
+    hb = hour_counts(dfB).rename(columns={"count": "collected"}) # B = Собрано
 
-    viz = (
-        alt.Chart(merged)
-        .transform_fold(
-            ["Изначально","Собрано"],
-            as_=["Тип","Значение"],
-            # сопоставление к колонкам
-        )
-        .calculate("datum['Тип'] == 'Изначально' ? datum.initial : datum.collected")
-    )
+    # Свести в одну таблицу по всем часам
+    merged = pd.merge(ha, hb, on="hour", how="outer").sort_values("hour")
+    if merged.empty:
+        st.info("Нет данных за выбранный период.")
+        return
 
-    # Altair не умеет напрямую из calculate писать в ту же колонку, поэтому сделаем второй шаг
-    # проще — подготовим «длинную» таблицу заранее:
-    long_df = pd.concat([
-        merged.assign(Тип="Изначально", Значение=merged["initial"])[["hour","Тип","Значение"]],
-        merged.assign(Тип="Собрано",    Значение=merged["collected"])[["hour","Тип","Значение"]],
-    ])
+    merged[["initial", "collected"]] = merged[["initial", "collected"]].fillna(0).astype(int)
+
+    # Преобразуем в «длинный» формат для Altair
+    long_df = merged.melt(
+        id_vars="hour",
+        value_vars=["initial", "collected"],
+        var_name="kind",
+        value_name="value"
+    )
+    # Переименуем подписи на графике
+    kind_map = {"initial": "Изначально", "collected": "Собрано"}
+    long_df["Тип"] = long_df["kind"].map(kind_map)
+    long_df = long_df.drop(columns=["kind"]).rename(columns={"value": "Значение"})
 
     chart = (
         alt.Chart(long_df)
@@ -229,13 +224,16 @@ def render_hour_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame):
             x=alt.X("hour:T", title="Дата и час"),
             y=alt.Y("Значение:Q", title="Количество"),
             color=alt.Color("Тип:N", title=""),
-            tooltip=[alt.Tooltip("hour:T", title="Час"),
-                     alt.Tooltip("Тип:N"),
-                     alt.Tooltip("Значение:Q")]
+            tooltip=[
+                alt.Tooltip("hour:T", title="Час"),
+                alt.Tooltip("Тип:N"),
+                alt.Tooltip("Значение:Q")
+            ],
         )
         .properties(height=300)
     )
     st.altair_chart(chart, use_container_width=True)
+
 
 def capital_calculator(bins_df: pd.DataFrame):
     st.markdown("### Калькулятор капитала")
