@@ -32,52 +32,7 @@ if USE_SUPABASE:
         st.warning(f"Не удалось инициализировать Supabase: {e}")
         USE_SUPABASE = False
 
-# ====== ВИДЕО-ПУТИ (локальные + fallback) ======
-A_RAW_LOCAL  = "/Users/takhmina/conveyor-vision/data/raw/videos/potato1.mp4"
-B_RAW_LOCAL  = "/Users/takhmina/conveyor-vision/data/raw/videos/potato2.mp4"
-A_ANNO_LOCAL = "/Users/takhmina/conveyor-vision/outputs/potatoA2_annotated.mp4"
-B_ANNO_LOCAL = "/Users/takhmina/conveyor-vision/outputs/potatoB2_annotated.mp4"
-
-# ваши старые gdrive-ссылки (оставим как 1-й бэкап)
-A_RAW_GDRIVE  = "https://drive.google.com/uc?export=download&id=17_mf6Nn-BbRIC0FHl3fT5lWtTU8CUlEV"
-B_RAW_GDRIVE  = "https://drive.google.com/uc?export=download&id=1pJQoeqci4r3CnVRywGZWvHARFZ5JBwo1"
-A_ANNO_GDRIVE = "https://drive.google.com/uc?export=download&id=1HZ9U806VOdBeoiiAR_gF0ojabeZPCaWI"
-B_ANNO_GDRIVE = "https://drive.google.com/uc?export=download&id=1nI-4HNaXodkW9xnznikVvBwyFdITv2Yp"
-
-# надёжные публичные MP4 с Range-заголовками (стримятся во всех браузерах)
-GCS_BIGBUCK   = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
-GCS_ELEPHANT  = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4"
-GCS_JOYRIDES  = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4"
-GCS_ESCAPES   = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4"
-
-A_RAW_FALLBACKS  = [A_RAW_GDRIVE, GCS_ELEPHANT]
-B_RAW_FALLBACKS  = [B_RAW_GDRIVE, GCS_BIGBUCK]
-A_ANNO_FALLBACKS = [A_ANNO_GDRIVE, GCS_JOYRIDES]
-B_ANNO_FALLBACKS = [B_ANNO_GDRIVE, GCS_ESCAPES]
-
-def show_video(title: str, local_path: str, fallbacks: list[str]):
-    """Показываем видео: локальный файл → первый рабочий URL из списка."""
-    st.caption(title)
-    src = None
-    if local_path and os.path.exists(local_path):
-        src = local_path
-    else:
-        # берём первый fallback (эти публичные GCS-ссылки стабильно стримятся)
-        src = fallbacks[0] if fallbacks else None
-        if not src:
-            st.warning("Видео недоступно")
-            return
-
-    # Используем сырой HTML, чтобы явно указать type и preload
-    st.markdown(
-        f"""
-        <video controls preload="metadata" playsinline style="width:100%;max-height:420px;border-radius:12px;">
-          <source src="{src}" type="video/mp4">
-          Ваш браузер не поддерживает видео. <a href="{src}" target="_blank">Открыть файл</a>.
-        </video>
-        """,
-        unsafe_allow_html=True,
-    )
+# (видео-демо больше не используется, код оставляем минимальным — ничего не вызывается)
 
 # ====== ОФОРМЛЕНИЕ ======
 st.markdown(
@@ -238,25 +193,23 @@ def page_login():
             st.rerun()
     st.caption("Доступ выдаётся администраторами.")
 
-# ====== ЧАРТ ПО ЧАСАМ (A vs B) ======
+# ====== ЧАРТ ПО ЧАСАМ (STACKED: B внизу, (A-B) сверху; сумма = A) ======
 def render_hour_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame):
     ha = hour_counts(dfA).rename(columns={"count": "initial"})   # A = Изначально
-    hb = hour_counts(dfB).rename(columns={"count": "collected"}) # B = Собрано
+    hb = hour_counts(dfB).rename(columns={"count": "collected"}) # B = Итого (Б)
     merged = pd.merge(ha, hb, on="hour", how="outer").sort_values("hour")
     if merged.empty:
         st.info("Нет данных за выбранный период.")
         return
 
     merged[["initial", "collected"]] = merged[["initial", "collected"]].fillna(0).astype(int)
-    long_df = merged.melt(
-        id_vars="hour",
-        value_vars=["initial", "collected"],
-        var_name="kind",
-        value_name="value"
-    )
-    kind_map = {"initial": "Изначально", "collected": "Собрано"}
-    long_df["Тип"] = long_df["kind"].map(kind_map)
-    long_df = long_df.drop(columns=["kind"]).rename(columns={"value": "Значение"})
+    merged["diff"] = (merged["initial"] - merged["collected"]).clip(lower=0)
+
+    # Готовим long-формат для стекования
+    long_df = pd.concat([
+        merged[["hour", "collected"]].rename(columns={"collected": "Значение"}).assign(Сегмент="Итого (B)"),
+        merged[["hour", "diff"]].rename(columns={"diff": "Значение"}).assign(Сегмент="Изначально (A)"),
+    ], ignore_index=True)
 
     x_axis = alt.X(
         "hour:T",
@@ -274,12 +227,13 @@ def render_hour_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame):
         .mark_bar()
         .encode(
             x=x_axis,
-            y=alt.Y("Значение:Q", title="Количество"),
-            color=alt.Color("Тип:N", title=""),
+            y=alt.Y("Значение:Q", title="Количество", stack="zero"),
+            color=alt.Color("Сегмент:N", title=""),
             tooltip=[
                 alt.Tooltip("hour:T", title="Час"),
-                alt.Tooltip("Тип:N"),
-                alt.Tooltip("Значение:Q"),
+                alt.Tooltip("Сегмент:N"),
+                alt.Tooltip("Значение:Q", title="В сегменте"),
+                alt.Tooltip(alt.datum(0), title=""),  # пустая строка-разделитель
             ],
         )
         .properties(
@@ -295,7 +249,7 @@ def render_hour_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame):
     st.altair_chart(chart, use_container_width=True)
     st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
 
-# ====== КАЛЬКУЛЯТОР КАПИТАЛА (по умолчанию все нули) ======
+# ====== КАЛЬКУЛЯТОР КАПИТАЛА (ввод вручную, нули по умолчанию, шаг +10) ======
 DEFAULT_WEIGHT_G = {"<30": 0.0, "30–40": 0.0, "40–50": 0.0, "50–60": 0.0, ">60": 0.0}
 DEFAULT_PRICE_KG = {"<30": 0.0, "30–40": 0.0, "40–50": 0.0, "50–60": 0.0, ">60": 0.0}
 
@@ -312,13 +266,21 @@ def capital_calculator(bins_df: pd.DataFrame):
     for i, cat in enumerate(CATEGORIES):
         with col_w[i]:
             weights_g[cat] = st.number_input(
-                f"Вес ({cat}), г/шт", min_value=0.0, step=10.0,
-                value=DEFAULT_WEIGHT_G.get(cat, 0.0), key=f"w_{cat}"
+                f"Вес ({cat}), г/шт",
+                min_value=0.0,
+                step=10.0,        # можно кликать +10
+                value=DEFAULT_WEIGHT_G.get(cat, 0.0),
+                format="%.2f",
+                key=f"calc_w_{cat}",
             )
         with col_p[i]:
             prices_kg[cat] = st.number_input(
-                f"Цена ({cat}), тг/кг", min_value=0.0, step=10.0,
-                value=DEFAULT_PRICE_KG.get(cat, 0.0), key=f"p_{cat}"
+                f"Цена ({cat}), тг/кг",
+                min_value=0.0,
+                step=10.0,        # можно кликать +10
+                value=DEFAULT_PRICE_KG.get(cat, 0.0),
+                format="%.2f",
+                key=f"calc_p_{cat}",
             )
 
     kg_totals = {cat: (counts.get(cat, 0) * weights_g.get(cat, 0.0)) / 1000.0 for cat in CATEGORIES}
@@ -336,7 +298,7 @@ def capital_calculator(bins_df: pd.DataFrame):
     df_view(calc_df)
     st.subheader(f"Итого капитал: **{total_sum:,.2f} тг**".replace(",", " "))
 
-# ====== ГЛАВНАЯ ВКЛАДКА ======
+# ====== ГЛАВНАЯ СТРАНИЦА ======
 def page_dashboard_online():
     header("Онлайн-данные")
 
@@ -380,46 +342,11 @@ def page_dashboard_online():
     bins_df = bins_table(dfA, dfB)
     df_view(bins_df[["Категория","Изначально","Потери (шт)","Собрано","% потери"]])
 
-    capital_calculator(bins_df)  # калькулятор — нули по умолчанию
+    capital_calculator(bins_df)
 
-def page_demo_from_videos():
-    header("Видео-демо (A/B)")
-
-    st.markdown("#### Ролики")
-    left, right = st.columns(2)
-    with left:
-        show_video("Точка A — исходник",       A_RAW_LOCAL,  A_RAW_FALLBACKS)
-        show_video("Точка A — аннотированное", A_ANNO_LOCAL, A_ANNO_FALLBACKS)
-    with right:
-        show_video("Точка B — исходник",       B_RAW_LOCAL,  B_RAW_FALLBACKS)
-        show_video("Точка B — аннотированное", B_ANNO_LOCAL, B_ANNO_FALLBACKS)
-
-    st.divider()
-
-    st.markdown("#### Данные по роликам (за последние 2 часа)")
-    if FORCE_DEMO_DATA:
-        dfA, dfB = demo_generate(date.today())
-    else:
-        start_dt = datetime.now(timezone.utc) - timedelta(hours=2)
-        end_dt   = datetime.now(timezone.utc)
-        dfA = fetch_events("A", start_dt, end_dt)
-        dfB = fetch_events("B", start_dt, end_dt)
-        if dfA.empty and dfB.empty:
-            dfA, dfB = demo_generate(date.today())
-
-    st.markdown("##### Поток по часам")
-    render_hour_chart_grouped(dfA, dfB)
-
-    st.markdown("##### Таблица по количеству")
-    df_view(bins_table(dfA, dfB)[["Категория","Изначально","Потери (шт)","Собрано","% потери"]])
-
-# ====== ОБЩАЯ СТРАНИЦА-ПРИЛОЖЕНИЕ ======
+# ====== APP (без вкладки видео-демо) ======
 def page_app():
-    tab1, tab2 = st.tabs(["Онлайн-данные", "Видео-демо (A/B)"])
-    with tab1:
-        page_dashboard_online()
-    with tab2:
-        page_demo_from_videos()
+    page_dashboard_online()
 
 # ====== MAIN ======
 def main():
