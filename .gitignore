@@ -205,3 +205,19 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Streamlit secrets (ключи, токены)
+.streamlit/secrets.toml
+
+# Файлы с API-ключами или паролями
+*.env
+keys.env
+config.json
+
+# Видео и большие данные (чтобы не тащить на GitHub)
+*.mp4
+*.avi
+*.mov
+*.mkv
+data/
+outputs/
