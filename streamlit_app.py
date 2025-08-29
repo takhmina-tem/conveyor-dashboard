@@ -192,39 +192,114 @@ def page_login():
     st.caption("Доступ выдаётся администраторами.")
 
 # ====== УТИЛИТА: Excel-выгрузка с надёжным фолбэком ======
+# ====== УТИЛИТА: Excel-выгрузка с авто-подбором ширины колонок ======
 def make_excel_bytes(hour_df: pd.DataFrame, bins_df: pd.DataFrame) -> tuple[bytes, str, str]:
     """
     Возвращает (bytes, ext, mime):
-      - ext = 'xlsx' при наличии xlsxwriter/openpyxl
+      - ext = 'xlsx' при наличии xlsxwriter/openpyxl (с авто-шириной колонок)
       - иначе ext = 'zip' (внутри два CSV)
     """
-    # Пытаемся через xlsxwriter
+    # ---------- Попытка №1: xlsxwriter (лучше управляет форматами/шириной) ----------
     try:
         import xlsxwriter  # noqa: F401
+
         buf = BytesIO()
-        with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+        with pd.ExcelWriter(buf, engine="xlsxwriter", datetime_format="yyyy-mm-dd hh:mm") as writer:
+            # Листы
             hour_df.to_excel(writer, index=False, sheet_name="Поток по часам")
             bins_df.to_excel(writer, index=False, sheet_name="Категории")
-        return buf.getvalue(), "xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+            wb = writer.book
+            ws_hours = writer.sheets["Поток по часам"]
+            ws_bins  = writer.sheets["Категории"]
+
+            # Формат для даты/времени
+            dt_fmt = wb.add_format({"num_format": "yyyy-mm-dd hh:mm"})
+
+            # --- авто-ширина для листа "Поток по часам"
+            for col_idx, col_name in enumerate(hour_df.columns):
+                col_data = hour_df[col_name]
+                # Если столбец датавремени — учитываем формат и целевую длину
+                if pd.api.types.is_datetime64_any_dtype(col_data):
+                    # ширина под формат YYYY-MM-DD HH:MM
+                    width = max(len(str(col_name)), 16) + 2
+                    ws_hours.set_column(col_idx, col_idx, width, dt_fmt)
+                else:
+                    # максимальная длина текста по данным + заголовок
+                    max_len = max(
+                        len(str(col_name)),
+                        int(col_data.astype(str).map(len).max() or 0)
+                    )
+                    ws_hours.set_column(col_idx, col_idx, max_len + 2)
+
+            # --- авто-ширина для листа "Категории"
+            for col_idx, col_name in enumerate(bins_df.columns):
+                col_data = bins_df[col_name]
+                max_len = max(
+                    len(str(col_name)),
+                    int(col_data.astype(str).map(len).max() or 0)
+                )
+                ws_bins.set_column(col_idx, col_idx, max_len + 2)
+
+        return (
+            buf.getvalue(),
+            "xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
     except Exception:
         pass
 
-    # Пытаемся через openpyxl
+    # ---------- Попытка №2: openpyxl ----------
     try:
         import openpyxl  # noqa: F401
+        from openpyxl.utils import get_column_letter
+
         buf = BytesIO()
-        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        with pd.ExcelWriter(buf, engine="openpyxl", datetime_format="yyyy-mm-dd hh:mm") as writer:
             hour_df.to_excel(writer, index=False, sheet_name="Поток по часам")
             bins_df.to_excel(writer, index=False, sheet_name="Категории")
-        return buf.getvalue(), "xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+            wb = writer.book
+            ws_hours = writer.sheets["Поток по часам"]
+            ws_bins  = writer.sheets["Категории"]
+
+            # Авто-ширина + формат для дат
+            def autofit_openpyxl(ws, df: pd.DataFrame):
+                for idx, col_name in enumerate(df.columns, start=1):
+                    col_letter = get_column_letter(idx)
+                    col_series = df[col_name]
+
+                    if pd.api.types.is_datetime64_any_dtype(col_series):
+                        # ширина под "yyyy-mm-dd hh:mm"
+                        width = max(len(str(col_name)), 16) + 2
+                        ws.column_dimensions[col_letter].width = width
+                        # применим формат ко всем ячейкам в колонке (кроме заголовка)
+                        for row in range(2, len(col_series) + 2):
+                            cell = ws[f"{col_letter}{row}"]
+                            cell.number_format = "yyyy-mm-dd hh:mm"
+                    else:
+                        max_len = max(
+                            len(str(col_name)),
+                            int(col_series.astype(str).map(len).max() or 0)
+                        )
+                        ws.column_dimensions[col_letter].width = max_len + 2
+
+            autofit_openpyxl(ws_hours, hour_df)
+            autofit_openpyxl(ws_bins, bins_df)
+
+        return (
+            buf.getvalue(),
+            "xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
     except Exception:
         pass
 
-    # Фолбэк: ZIP с CSV
+    # ---------- Фолбэк: ZIP с CSV ----------
     buf = BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("Поток по часам.csv", hour_df.to_csv(index=False))
-        zf.writestr("Категории.csv", bins_df.to_csv(index=False))
+        zf.writestr("Категории.csv",    bins_df.to_csv(index=False))
     return buf.getvalue(), "zip", "application/zip"
 
 # ====== ЧАРТ ПО ЧАСАМ (STACKED: B внизу, (A-B) сверху; сумма = A) ======
