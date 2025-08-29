@@ -195,6 +195,30 @@ def demo_generate_week(week_start: date, week_end: date):
         cur += timedelta(days=1)
     return pd.concat(dfAs, ignore_index=True), pd.concat(dfBs, ignore_index=True)
 
+# ====== ЛОГИН (минимальный; используется только если USE_SUPABASE=True) ======
+def page_login():
+    st.subheader("Вход в систему")
+    with st.form("login_form", clear_on_submit=False):
+        email = st.text_input("E-mail", placeholder="you@company.com")
+        password = st.text_input("Пароль", type="password", placeholder="••••••••")
+        submitted = st.form_submit_button("Войти")
+    if submitted:
+        ok = True
+        if USE_SUPABASE:
+            try:
+                resp = _sb.auth.sign_in_with_password({"email": email, "password": password})
+                ok = bool(getattr(resp, "user", None))
+                if not ok:
+                    st.error("Неверная почта или пароль.")
+            except Exception as e:
+                st.error(f"Ошибка авторизации: {e}")
+                ok = False
+        if ok:
+            st.session_state["authed"] = True
+            st.session_state["route"] = "app"
+            st.rerun()
+    st.caption("Доступ выдаётся администраторами.")
+
 # ====== УТИЛИТА: Excel-выгрузка с авто-подбором ширины колонок ======
 def make_excel_bytes(hour_df: pd.DataFrame, bins_df: pd.DataFrame) -> tuple[bytes, str, str]:
     try:
@@ -358,7 +382,7 @@ def render_week_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame, week_start: 
     st.altair_chart(chart, use_container_width=True)
     return merged
 
-# ====== ТОП-10 ДНЕЙ УРОЖАЯ (без изменений) ======
+# ====== ТОП-10 ДНЕЙ УРОЖАЯ ======
 def render_top10_days(dfA_31: pd.DataFrame, dfB_31: pd.DataFrame):
     dB = day_counts(dfB_31)
     if dB.empty:
@@ -380,7 +404,7 @@ def render_top10_days(dfA_31: pd.DataFrame, dfB_31: pd.DataFrame):
     )
     st.altair_chart(chart, use_container_width=True)
 
-# ====== КАЛЬКУЛЯТОР КАПИТАЛА (без изменений) ======
+# ====== КАЛЬКУЛЯТОР КАПИТАЛА ======
 DEFAULT_WEIGHT_G = {"<30": 20.0, "30–40": 48.0, "40–50": 83.0, "50–60": 130.0, ">60": 205.0}
 DEFAULT_PRICE_KG = {"<30": 0.0,  "30–40": 0.0,  "40–50": 0.0,  "50–60": 0.0,  ">60": 0.0}
 
@@ -429,7 +453,7 @@ def capital_calculator(bins_df: pd.DataFrame):
     df_view(calc_df)
     st.subheader(f"Итого капитал: **{total_sum:,.2f} тг**".replace(",", " "))
 
-# ====== ВЕСОВАЯ ТАБЛИЦА (без изменений) ======
+# ====== ВЕСОВАЯ ТАБЛИЦА ======
 def render_weight_table(day: date):
     rng = random.Random(1000 + int(day.strftime("%Y%m%d")))
     hours = [10, 12, 14, 16]
@@ -530,7 +554,7 @@ def page_dashboard_online():
 
     render_week_chart_grouped(wA, wB, week_start, week_end)
 
-    # --- Топ-10 дней урожая (как был)
+    # --- Топ-10 дней урожая
     st.markdown("### Топ-10 дней урожая за последние 31 день")
     render_top10_days(dfA_31, dfB_31)
 
