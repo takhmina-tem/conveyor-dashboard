@@ -3,6 +3,7 @@ import os
 import random
 from datetime import datetime, date, time, timedelta, timezone
 from typing import Optional
+from io import BytesIO
 
 import streamlit as st
 import pandas as pd
@@ -189,6 +190,21 @@ def page_login():
             st.rerun()
     st.caption("Доступ выдаётся администраторами.")
 
+# ====== УТИЛИТА: Excel-выгрузка ======
+def make_excel_bytes(hour_df: pd.DataFrame, bins_df: pd.DataFrame) -> bytes:
+    buffer = BytesIO()
+    try:
+        with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
+            hour_df.to_excel(writer, index=False, sheet_name="Поток по часам")
+            bins_df.to_excel(writer, index=False, sheet_name="Категории")
+        return buffer.getvalue()
+    except Exception:
+        # запасной вариант (если xlsxwriter не установлен)
+        with pd.ExcelWriter(buffer) as writer:
+            hour_df.to_excel(writer, index=False, sheet_name="Поток по часам")
+            bins_df.to_excel(writer, index=False, sheet_name="Категории")
+        return buffer.getvalue()
+
 # ====== ЧАРТ ПО ЧАСАМ (STACKED: B внизу, (A-B) сверху; сумма = A) ======
 def render_hour_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame):
     ha = hour_counts(dfA).rename(columns={"count": "initial"})   # A = Изначально
@@ -196,7 +212,7 @@ def render_hour_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame):
     merged = pd.merge(ha, hb, on="hour", how="outer").sort_values("hour")
     if merged.empty:
         st.info("Нет данных за выбранный период.")
-        return
+        return pd.DataFrame()  # вернём пустую для Excel-кнопки выше
 
     merged[["initial", "collected"]] = merged[["initial", "collected"]].fillna(0).astype(int)
     merged["diff"] = (merged["initial"] - merged["collected"]).clip(lower=0)
@@ -235,19 +251,12 @@ def render_hour_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame):
 
     st.altair_chart(chart, use_container_width=True)
     st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+    return merged
 
-# ====== КАЛЬКУЛЯТОР КАПИТАЛА (текстовый ввод, placeholder "0") ======
-def _parse_float(s: Optional[str]) -> float:
-    if not s:
-        return 0.0
-    s = s.strip().replace(",", ".")
-    try:
-        return float(s)
-    except:
-        return 0.0
-
-DEFAULT_WEIGHT_G = {"<30": 0.0, "30–40": 0.0, "40–50": 0.0, "50–60": 0.0, ">60": 0.0}
-DEFAULT_PRICE_KG = {"<30": 0.0, "30–40": 0.0, "40–50": 0.0, "50–60": 0.0, ">60": 0.0}
+# ====== КАЛЬКУЛЯТОР КАПИТАЛА ======
+# Средние веса (можно менять вручную)
+DEFAULT_WEIGHT_G = {"<30": 20.0, "30–40": 48.0, "40–50": 83.0, "50–60": 130.0, ">60": 205.0}
+DEFAULT_PRICE_KG = {"<30": 0.0,  "30–40": 0.0,  "40–50": 0.0,  "50–60": 0.0,  ">60": 0.0}
 
 def capital_calculator(bins_df: pd.DataFrame):
     st.markdown("### Калькулятор капитала")
@@ -261,24 +270,26 @@ def capital_calculator(bins_df: pd.DataFrame):
 
     for i, cat in enumerate(CATEGORIES):
         with col_w[i]:
-            # без value=..., только key + placeholder
-            raw_w = st.text_input(
+            weights_g[cat] = st.number_input(
                 f"Вес ({cat}), г/шт",
+                min_value=0.0,
+                step=10.0,
+                value=float(DEFAULT_WEIGHT_G.get(cat, 0.0)),
+                format="%.2f",
                 key=f"calc_w_{cat}",
-                placeholder="0",
             )
-            weights_g[cat] = _parse_float(raw_w) if raw_w is not None else DEFAULT_WEIGHT_G[cat]
-
         with col_p[i]:
-            raw_p = st.text_input(
+            prices_kg[cat] = st.number_input(
                 f"Цена ({cat}), тг/кг",
+                min_value=0.0,
+                step=10.0,
+                value=float(DEFAULT_PRICE_KG.get(cat, 0.0)),
+                format="%.2f",
                 key=f"calc_p_{cat}",
-                placeholder="0",
             )
-            prices_kg[cat] = _parse_float(raw_p) if raw_p is not None else DEFAULT_PRICE_KG[cat]
 
     kg_totals = {cat: (counts.get(cat, 0) * weights_g.get(cat, 0.0)) / 1000.0 for cat in CATEGORIES}
-    subtotals = {cat: kg_totals[cat] * prices_kg.get(cat, 0.0) for cat in CATEGORIES}
+    subtotals = {cat: kg_totals[cat] * prices_kg.get(cat, 0.0) for c in CATEGORIES}
     total_sum = round(sum(subtotals.values()), 2)
 
     calc_df = pd.DataFrame({
@@ -292,9 +303,40 @@ def capital_calculator(bins_df: pd.DataFrame):
     df_view(calc_df)
     st.subheader(f"Итого капитал: **{total_sum:,.2f} тг**".replace(",", " "))
 
+# ====== PIE ЧАРТ ======
+def render_pie(initial_total: int, losses_total: int, collected_total: int):
+    pie_df = pd.DataFrame({
+        "Тип": ["Изначально", "Потери", "Собрано"],
+        "Значение": [initial_total, losses_total, collected_total],
+    })
+    chart = (
+        alt.Chart(pie_df)
+        .mark_arc()
+        .encode(
+            theta=alt.Theta("Значение:Q"),
+            color=alt.Color("Тип:N", title=""),
+            tooltip=["Тип:N", "Значение:Q"],
+        )
+        .properties(height=300)
+    )
+    st.altair_chart(chart, use_container_width=True)
+
+# ====== ВЕСОВАЯ ТАБЛИЦА (4 строки, демо) ======
+def render_weight_table(day: date):
+    rng = random.Random(1000 + int(day.strftime("%Y%m%d")))
+    hours = [10, 12, 14, 16]
+    weights = [round(rng.uniform(120, 220), 1) for _ in hours]  # кг
+    rows = []
+    for h, w in zip(hours, weights):
+        ts = datetime.combine(day, time(h, 0))
+        rows.append({"Дата и час": ts.strftime("%Y-%m-%d %H:%M"), "Вес, кг": w})
+    df = pd.DataFrame(rows)
+    st.markdown("### Весовая таблица")
+    df_view(df)
+
 # ====== ГЛАВНАЯ СТРАНИЦА ======
 def page_dashboard_online():
-    # убрали подзаголовок "Онлайн-данные"
+    # Без подзаголовка
     header()
 
     c_top1, c_top2, c_top3 = st.columns([1.3,1,1])
@@ -303,6 +345,7 @@ def page_dashboard_online():
     with c_top2:
         st.empty()
     with c_top3:
+        top_right = st.container()  # сюда позже поставим кнопку выгрузки
         if st.button("Выйти"):
             st.session_state["authed"] = False
             go("login")
@@ -330,16 +373,45 @@ def page_dashboard_online():
     m3.metric("Собрано (шт)", value=f"{total_collected}")
 
     st.markdown("### Поток по часам")
-    render_hour_chart_grouped(dfA, dfB)
+    merged_hours = render_hour_chart_grouped(dfA, dfB)
 
+    # Кнопка экспорта (справа сверху) — после того, как есть данные
+    if not merged_hours.empty:
+        ha = hour_counts(dfA).rename(columns={"count": "Изначально (A)"})
+        hb = hour_counts(dfB).rename(columns={"count": "Итого (B)"})
+        hour_export = pd.merge(ha, hb, on="hour", how="outer").sort_values("hour")
+        hour_export = hour_export.fillna(0).rename(columns={"hour": "Дата и час"})
+        bins_df = bins_table(dfA, dfB)
+
+        excel_bytes = make_excel_bytes(hour_export, bins_df)
+        with top_right:
+            st.download_button(
+                label="⬇️ Скачать Excel",
+                data=excel_bytes,
+                file_name=f"potato_report_{day.isoformat()}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+    else:
+        bins_df = bins_table(dfA, dfB)  # чтобы не падало
+
+    # Pie chart
+    st.markdown("### Структура за день")
+    render_pie(total_initial, total_losses, total_collected)
+
+    # Таблица по категориям
     st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
     st.markdown("### Таблица по количеству")
     bins_df = bins_table(dfA, dfB)
     df_view(bins_df[["Категория","Изначально","Потери (шт)","Собрано","% потери"]])
 
+    # Весовая таблица (демо 4 строки)
+    render_weight_table(day)
+
+    # Калькулятор
     capital_calculator(bins_df)
 
-# ====== APP (без вкладки видео-демо) ======
+# ====== APP (без вкладок) ======
 def page_app():
     page_dashboard_online()
 
