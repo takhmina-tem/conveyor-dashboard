@@ -68,6 +68,8 @@ if "authed" not in st.session_state:
     st.session_state["authed"] = False
 if "route" not in st.session_state:
     st.session_state["route"] = "login"  # 'login' | 'app'
+if "day_picker" not in st.session_state:
+    st.session_state["day_picker"] = date.today()
 
 def go(page: str):
     st.session_state["route"] = page
@@ -78,6 +80,12 @@ def _ensure_aware_utc(dt: datetime) -> datetime:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
+
+def week_bounds(d: date) -> tuple[date, date]:
+    """Понедельник..Воскресенье для даты d."""
+    start = d - timedelta(days=d.weekday())
+    end = start + timedelta(days=6)
+    return start, end
 
 # ====== ЧТЕНИЕ ДАННЫХ (если USE_SUPABASE=True) ======
 def fetch_events(point: Optional[str], start_dt: datetime, end_dt: datetime) -> pd.DataFrame:
@@ -183,6 +191,15 @@ def demo_generate_range(ref_day: date, days: int = 31):
         day_i = ref_day - timedelta(days=d)
         a, b = demo_generate(day_i)
         dfAs.append(a); dfBs.append(b)
+    return pd.concat(dfAs, ignore_index=True), pd.concat(dfBs, ignore_index=True)
+
+def demo_generate_week(week_start: date, week_end: date):
+    dfAs, dfBs = [], []
+    cur = week_start
+    while cur <= week_end:
+        a, b = demo_generate(cur)
+        dfAs.append(a); dfBs.append(b)
+        cur += timedelta(days=1)
     return pd.concat(dfAs, ignore_index=True), pd.concat(dfBs, ignore_index=True)
 
 # ====== ЛОГИН (без повторного header) ======
@@ -319,13 +336,21 @@ def render_hour_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame):
     st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
     return merged
 
-# ====== ЧАРТ ПО ДНЯМ (STACKED: B внизу, (A-B) сверху; сумма = A) ======
-def render_day_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame):
-    da = day_counts(dfA).rename(columns={"count": "initial"})     # A по дням
-    db = day_counts(dfB).rename(columns={"count": "collected"})   # B по дням
+# ====== ЧАРТ ПО НЕДЕЛЯМ (каждый столбец — день недели, стек как выше) ======
+def render_week_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame, week_start: date, week_end: date):
+    if dfA.empty and dfB.empty:
+        st.info("Нет данных за эту неделю.")
+        return pd.DataFrame()
+
+    # Агрегация по дням в рамках недели
+    da = day_counts(dfA).rename(columns={"count": "initial"})
+    db = day_counts(dfB).rename(columns={"count": "collected"})
     merged = pd.merge(da, db, on="day", how="outer").sort_values("day")
+    # Фильтр на диапазон недели
+    merged = merged[(merged["day"] >= pd.Timestamp(week_start)) & (merged["day"] <= pd.Timestamp(week_end))]
+
     if merged.empty:
-        st.info("Нет данных по дням.")
+        st.info("Нет данных за эту неделю.")
         return pd.DataFrame()
 
     merged[["initial", "collected"]] = merged[["initial", "collected"]].fillna(0).astype(int)
@@ -333,16 +358,16 @@ def render_day_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame):
 
     long_df = pd.concat([
         merged[["day", "collected"]].rename(columns={"collected": "Значение"}).assign(Сегмент="Итого (B)"),
-        merged[["day", "diff"]].rename(columns={"diff": "Значение"}).assign(Сегмент="Изначально (A)"),
+        merged[["day", "diff"]].rename(columns={"diff": "Значение"}).assign(Сегмент="Изначально (А)"),
     ], ignore_index=True)
 
     chart = (
         alt.Chart(long_df)
         .mark_bar()
         .encode(
-            x=alt.X("day:T", title="Дата", axis=alt.Axis(labelOverlap=True, titlePadding=20, labelAngle=0)),
+            x=alt.X("day:T", title="День недели", axis=alt.Axis(labelOverlap=True, titlePadding=20, labelAngle=0)),
             y=alt.Y("Значение:Q", title="Количество", stack="zero"),
-            color=alt.Color("Сегмент:N", title="", scale=alt.Scale(domain=["Итого (B)", "Изначально (A)"])),
+            color=alt.Color("Сегмент:N", title="", scale=alt.Scale(domain=["Итого (B)", "Изначально (А)"])),
             tooltip=[alt.Tooltip("day:T", title="Дата"), alt.Tooltip("Сегмент:N"), alt.Tooltip("Значение:Q", title="В сегменте")],
         )
         .properties(height=320, padding={"top": 10, "right": 12, "bottom": 44, "left": 8})
@@ -351,14 +376,14 @@ def render_day_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame):
     st.altair_chart(chart, use_container_width=True)
     return merged
 
-# ====== ТОП-10 ДНЕЙ УРОЖАЯ (за последние 31 день, по B) ======
+# ====== ТОП-10 ДНЕЙ УРОЖАЯ ======
 def render_top10_days(dfA_31: pd.DataFrame, dfB_31: pd.DataFrame):
     dB = day_counts(dfB_31)
     if dB.empty:
         st.info("Нет данных для топ-10 дней.")
         return
 
-    top = dB.nlargest(10, "count").sort_values("count", ascending=True)  # для красивого горизонтального чарта
+    top = dB.nlargest(10, "count").sort_values("count", ascending=True)
     top["Дата"] = pd.to_datetime(top["day"]).dt.strftime("%Y-%m-%d")
 
     chart = (
@@ -408,7 +433,7 @@ def capital_calculator(bins_df: pd.DataFrame):
             )
 
     kg_totals = {cat: (counts.get(cat, 0) * weights_g.get(cat, 0.0)) / 1000.0 for cat in CATEGORIES}
-    subtotals = {cat: kg_totals[cat] * prices_kg.get(cat, 0.0) for c in CATEGORIES}
+    subtotals = {cat: kg_totals[cat] * prices_kg.get(cat, 0.0) for cat in CATEGORIES}  # FIX: правильная переменная
     total_sum = round(sum(subtotals.values()), 2)
 
     calc_df = pd.DataFrame({
@@ -441,9 +466,22 @@ def page_dashboard_online():
 
     c_top1, c_top2, c_top3 = st.columns([1.3,1,1])
     with c_top1:
-        day = st.date_input("Дата", value=date.today())
+        # дата якоря — можно выбирать любую дату недели
+        picked = st.date_input("Дата", value=st.session_state["day_picker"], key="day_picker")
     with c_top2:
-        st.empty()
+        # навигация по неделям (без эмодзи)
+        prev_col, label_col, next_col = st.columns([1,2,1])
+        with prev_col:
+            if st.button("Предыдущая неделя"):
+                st.session_state["day_picker"] = st.session_state["day_picker"] - timedelta(days=7)
+                st.rerun()
+        with label_col:
+            ws, we = week_bounds(st.session_state["day_picker"])
+            st.markdown(f"<div style='text-align:center; font-weight:600;'>Неделя: {ws.isoformat()} — {we.isoformat()}</div>", unsafe_allow_html=True)
+        with next_col:
+            if st.button("Следующая неделя"):
+                st.session_state["day_picker"] = st.session_state["day_picker"] + timedelta(days=7)
+                st.rerun()
     with c_top3:
         top_right = st.container()
         if st.button("Выйти"):
@@ -452,7 +490,8 @@ def page_dashboard_online():
 
     st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
 
-    # --- Данные за выбранный день
+    # --- Данные за выбранный день (для метрик/часового графика/таблиц)
+    day = st.session_state["day_picker"]
     start = datetime.combine(day, time.min).replace(tzinfo=timezone.utc)
     end   = datetime.combine(day, time.max).replace(tzinfo=timezone.utc)
 
@@ -488,14 +527,14 @@ def page_dashboard_online():
     file_bytes, ext, mime = make_excel_bytes(hour_export, bins_df)
     with top_right:
         st.download_button(
-            label="⬇️ Скачать отчёт" + (" (Excel)" if ext == "xlsx" else " (ZIP/CSV)"),
+            label="Скачать отчёт" + (" (Excel)" if ext == "xlsx" else " (ZIP/CSV)"),
             data=file_bytes,
             file_name=f"potato_report_{day.isoformat()}." + ext,
             mime=mime,
             use_container_width=True
         )
 
-    # --- Данные за последние 31 день (для дневного графика и топ-10)
+    # --- Данные за последние 31 день (для топ-10)
     start_31 = datetime.combine(day - timedelta(days=30), time.min).replace(tzinfo=timezone.utc)
     end_31   = datetime.combine(day, time.max).replace(tzinfo=timezone.utc)
 
@@ -507,9 +546,20 @@ def page_dashboard_online():
         if dfA_31.empty and dfB_31.empty:
             dfA_31, dfB_31 = demo_generate_range(day, days=31)
 
-    # --- Поток по дням
-    st.markdown("### Поток по дням (последние 31 день)")
-    render_day_chart_grouped(dfA_31, dfB_31)
+    # --- Поток по неделям (текущая неделя, дни внутри)
+    st.markdown("### Поток по неделям (дни текущей недели)")
+    week_start, week_end = week_bounds(day)
+    if FORCE_DEMO_DATA:
+        wA, wB = demo_generate_week(week_start, week_end)
+    else:
+        ws_dt = datetime.combine(week_start, time.min).replace(tzinfo=timezone.utc)
+        we_dt = datetime.combine(week_end,   time.max).replace(tzinfo=timezone.utc)
+        wA = fetch_events("A", ws_dt, we_dt)
+        wB = fetch_events("B", ws_dt, we_dt)
+        if wA.empty and wB.empty:
+            wA, wB = demo_generate_week(week_start, week_end)
+
+    render_week_chart_grouped(wA, wB, week_start, week_end)
 
     # --- Топ-10 дней урожая (по Собрано B)
     st.markdown("### Топ-10 дней урожая за последние 31 день")
