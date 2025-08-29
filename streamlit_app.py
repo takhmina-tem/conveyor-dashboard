@@ -426,7 +426,7 @@ def render_weight_table(day: date):
     rows = []
     for h, w in zip(hours, weights):
         ts = datetime.combine(day, time(h, 0))
-        rows.append({"Дата и час": ts.strftime("%Y-%m-%d %H:%M"), "Вес, кг": w})
+        rows.append({"Дата и час": ts.strftime("%Y-%m-%d %H:%M"), "Вес, т": w})
     df = pd.DataFrame(rows)
     st.markdown("### Весовая таблица")
     df_view(df)
