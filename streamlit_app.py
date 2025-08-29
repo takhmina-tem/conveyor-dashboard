@@ -69,7 +69,7 @@ if "authed" not in st.session_state:
 if "route" not in st.session_state:
     st.session_state["route"] = "login"  # 'login' | 'app'
 if "day_picker" not in st.session_state:
-    st.session_state["day_picker"] = date.today()  # инициализируем один раз
+    st.session_state["day_picker"] = date.today()  # инициализация
 
 def go(page: str):
     st.session_state["route"] = page
@@ -161,12 +161,6 @@ def bins_table(dfA: pd.DataFrame, dfB: pd.DataFrame) -> pd.DataFrame:
 
 # ====== ДЕМО-ДАННЫЕ ======
 def demo_generate(day: date, base: int = 620, jitter: int = 90, seed: int = 42):
-    """
-    Реалистичный демо-поток:
-      - A (вход) ~ N(base, jitter)
-      - B (собрано) = A * U(0.70, 0.85)
-      - width_cm ~ N(52..53, 7.5..8.5) с отсечением [25, 75]
-    """
     rng = random.Random(seed + int(day.strftime("%Y%m%d")))
     hours = [datetime.combine(day, time(h,0)) for h in range(24)]
     rowsA, rowsB = [], []
@@ -185,7 +179,6 @@ def demo_generate(day: date, base: int = 620, jitter: int = 90, seed: int = 42):
     return pd.DataFrame(rowsA), pd.DataFrame(rowsB)
 
 def demo_generate_range(ref_day: date, days: int = 31):
-    """Генерация демо-данных за последние `days` дней, включая ref_day."""
     dfAs, dfBs = [], []
     for d in range(days-1, -1, -1):
         day_i = ref_day - timedelta(days=d)
@@ -204,19 +197,12 @@ def demo_generate_week(week_start: date, week_end: date):
 
 # ====== УТИЛИТА: Excel-выгрузка с авто-подбором ширины колонок ======
 def make_excel_bytes(hour_df: pd.DataFrame, bins_df: pd.DataFrame) -> tuple[bytes, str, str]:
-    """
-    Возвращает (bytes, ext, mime):
-      - ext = 'xlsx' при наличии xlsxwriter/openpyxl (с авто-шириной колонок)
-      - иначе ext = 'zip' (внутри два CSV)
-    """
-    # xlsxwriter
     try:
         import xlsxwriter  # noqa: F401
         buf = BytesIO()
         with pd.ExcelWriter(buf, engine="xlsxwriter", datetime_format="yyyy-mm-dd hh:mm") as writer:
             hour_df.to_excel(writer, index=False, sheet_name="Поток по часам")
             bins_df.to_excel(writer, index=False, sheet_name="Категории")
-
             wb = writer.book
             ws_hours = writer.sheets["Поток по часам"]
             ws_bins  = writer.sheets["Категории"]
@@ -237,7 +223,6 @@ def make_excel_bytes(hour_df: pd.DataFrame, bins_df: pd.DataFrame) -> tuple[byte
     except Exception:
         pass
 
-    # openpyxl
     try:
         import openpyxl  # noqa: F401
         from openpyxl.utils import get_column_letter
@@ -245,7 +230,6 @@ def make_excel_bytes(hour_df: pd.DataFrame, bins_df: pd.DataFrame) -> tuple[byte
         with pd.ExcelWriter(buf, engine="openpyxl", datetime_format="yyyy-mm-dd hh:mm") as writer:
             hour_df.to_excel(writer, index=False, sheet_name="Поток по часам")
             bins_df.to_excel(writer, index=False, sheet_name="Категории")
-            wb = writer.book
             ws_hours = writer.sheets["Поток по часам"]
             ws_bins  = writer.sheets["Категории"]
             def autofit(ws, df):
@@ -265,14 +249,13 @@ def make_excel_bytes(hour_df: pd.DataFrame, bins_df: pd.DataFrame) -> tuple[byte
     except Exception:
         pass
 
-    # ZIP/CSV фолбэк
     buf = BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("Поток по часам.csv", hour_df.to_csv(index=False))
         zf.writestr("Категории.csv",    bins_df.to_csv(index=False))
     return buf.getvalue(), "zip", "application/zip"
 
-# ====== ЧАРТ ПО ЧАСАМ (оставляем без изменений) ======
+# ====== ЧАРТ ПО ЧАСАМ (без изменений) ======
 def render_hour_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame):
     ha = hour_counts(dfA).rename(columns={"count": "initial"})   # A = Изначально
     hb = hour_counts(dfB).rename(columns={"count": "collected"}) # B = Итого (Б)
@@ -312,54 +295,62 @@ def render_hour_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame):
     st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
     return merged
 
-# ====== ЧАРТ ПО НЕДЕЛЯМ (стрелки навигации тут) ======
+# ====== ЧАРТ ПО НЕДЕЛЯМ (с навигацией и русскими днями) ======
+RU_DOW = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+
+def _shift_week(delta_days: int):
+    # callback для кнопок навигации
+    st.session_state["day_picker"] = st.session_state["day_picker"] + timedelta(days=delta_days)
+
 def render_week_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame, week_start: date, week_end: date):
     # Панель навигации неделями (кнопки "<" и ">")
     nav_left, nav_center, nav_right = st.columns([1, 2, 1])
     with nav_left:
-        if st.button("<"):
-            st.session_state["day_picker"] = st.session_state["day_picker"] - timedelta(days=7)
-            st.rerun()
+        st.button("<", key="week_prev_btn", on_click=_shift_week, args=(-7,))
     with nav_center:
         st.markdown(
-            f"<div style='text-align:center; font-weight:600;'>Неделя: {week_start.isoformat()} — {week_end.isoformat()}</div>",
+            f"<div style='text-align:center; font-weight:600;'>Неделя: {week_start.strftime('%d.%m')} — {week_end.strftime('%d.%m')}</div>",
             unsafe_allow_html=True
         )
     with nav_right:
-        if st.button(">"):
-            st.session_state["day_picker"] = st.session_state["day_picker"] + timedelta(days=7)
-            st.rerun()
+        st.button(">", key="week_next_btn", on_click=_shift_week, args=(7,))
 
     if dfA.empty and dfB.empty:
         st.info("Нет данных за эту неделю.")
         return pd.DataFrame()
 
-    # Агрегация по дням в рамках недели
+    # Агрегация по дням недели (0=Пн..6=Вс)
     da = day_counts(dfA).rename(columns={"count": "initial"})
     db = day_counts(dfB).rename(columns={"count": "collected"})
-    merged = pd.merge(da, db, on="day", how="outer").sort_values("day")
-    merged = merged[(merged["day"] >= pd.Timestamp(week_start)) & (merged["day"] <= pd.Timestamp(week_end))]
 
-    if merged.empty:
-        st.info("Нет данных за эту неделю.")
-        return pd.DataFrame()
+    # Готовим полный каркас недели, чтобы всегда было 7 столбиков
+    base = pd.DataFrame({
+        "day": [pd.Timestamp(week_start + timedelta(days=i)) for i in range(7)],
+        "dow": list(range(7)),
+    })
 
+    da["day"] = pd.to_datetime(da["day"]).dt.floor("D")
+    db["day"] = pd.to_datetime(db["day"]).dt.floor("D")
+
+    merged = base.merge(da, on="day", how="left").merge(db, on="day", how="left", suffixes=("", "_b"))
     merged[["initial", "collected"]] = merged[["initial", "collected"]].fillna(0).astype(int)
     merged["diff"] = (merged["initial"] - merged["collected"]).clip(lower=0)
+    merged["День"] = merged["dow"].map(lambda i: RU_DOW[i])
+    merged["Дата"] = merged["day"].dt.strftime("%Y-%m-%d")
 
     long_df = pd.concat([
-        merged[["day", "collected"]].rename(columns={"collected": "Значение"}).assign(Сегмент="Итого (B)"),
-        merged[["day", "diff"]].rename(columns={"diff": "Значение"}).assign(Сегмент="Изначально (A)"),
+        merged[["День", "Дата", "collected"]].rename(columns={"collected": "Значение"}).assign(Сегмент="Итого (B)"),
+        merged[["День", "Дата", "diff"]].rename(columns={"diff": "Значение"}).assign(Сегмент="Изначально (A)"),
     ], ignore_index=True)
 
     chart = (
         alt.Chart(long_df)
         .mark_bar()
         .encode(
-            x=alt.X("day:T", title="День недели", axis=alt.Axis(labelOverlap=True, titlePadding=20, labelAngle=0)),
+            x=alt.X("День:N", title="День недели", sort=RU_DOW),
             y=alt.Y("Значение:Q", title="Количество", stack="zero"),
             color=alt.Color("Сегмент:N", title="", scale=alt.Scale(domain=["Итого (B)", "Изначально (A)"])),
-            tooltip=[alt.Tooltip("day:T", title="Дата"), alt.Tooltip("Сегмент:N"), alt.Tooltip("Значение:Q", title="В сегменте")],
+            tooltip=[alt.Tooltip("День:N"), alt.Tooltip("Дата:N"), alt.Tooltip("Сегмент:N"), alt.Tooltip("Значение:Q", title="В сегменте")],
         )
         .properties(height=320, padding={"top": 10, "right": 12, "bottom": 44, "left": 8})
         .configure_axis(labelFontSize=12, titleFontSize=12)
@@ -367,7 +358,7 @@ def render_week_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame, week_start: 
     st.altair_chart(chart, use_container_width=True)
     return merged
 
-# ====== ТОП-10 ДНЕЙ УРОЖАЯ ======
+# ====== ТОП-10 ДНЕЙ УРОЖАЯ (без изменений) ======
 def render_top10_days(dfA_31: pd.DataFrame, dfB_31: pd.DataFrame):
     dB = day_counts(dfB_31)
     if dB.empty:
@@ -389,7 +380,7 @@ def render_top10_days(dfA_31: pd.DataFrame, dfB_31: pd.DataFrame):
     )
     st.altair_chart(chart, use_container_width=True)
 
-# ====== КАЛЬКУЛЯТОР КАПИТАЛА ======
+# ====== КАЛЬКУЛЯТОР КАПИТАЛА (без изменений) ======
 DEFAULT_WEIGHT_G = {"<30": 20.0, "30–40": 48.0, "40–50": 83.0, "50–60": 130.0, ">60": 205.0}
 DEFAULT_PRICE_KG = {"<30": 0.0,  "30–40": 0.0,  "40–50": 0.0,  "50–60": 0.0,  ">60": 0.0}
 
@@ -438,7 +429,7 @@ def capital_calculator(bins_df: pd.DataFrame):
     df_view(calc_df)
     st.subheader(f"Итого капитал: **{total_sum:,.2f} тг**".replace(",", " "))
 
-# ====== ВЕСОВАЯ ТАБЛИЦА (4 строки, демо) ======
+# ====== ВЕСОВАЯ ТАБЛИЦА (без изменений) ======
 def render_weight_table(day: date):
     rng = random.Random(1000 + int(day.strftime("%Y%m%d")))
     hours = [10, 12, 14, 16]
@@ -457,8 +448,7 @@ def page_dashboard_online():
 
     c_top1, c_top2, c_top3 = st.columns([1.3,1,1])
     with c_top1:
-        # избегаем конфликта: используем только key, без value
-        st.date_input("Дата", key="day_picker")
+        st.date_input("Дата", key="day_picker")  # без value=..., используем session_state
     with c_top2:
         st.empty()
     with c_top3:
@@ -492,7 +482,7 @@ def page_dashboard_online():
     m2.metric("Потери (шт)", value=f"{total_losses}")
     m3.metric("Собрано (шт)", value=f"{total_collected}")
 
-    # --- Поток по часам (оставляем)
+    # --- Поток по часам (как был)
     st.markdown("### Поток по часам")
     merged_hours = render_hour_chart_grouped(dfA, dfB)
 
@@ -525,8 +515,8 @@ def page_dashboard_online():
         if dfA_31.empty and dfB_31.empty:
             dfA_31, dfB_31 = demo_generate_range(day, days=31)
 
-    # --- Поток по неделям (кнопки навигации здесь)
-    st.markdown("### Поток по неделям (дни текущей недели)")
+    # --- Поток по неделям (с навигацией и русскими днями)
+    st.markdown("### Поток по неделям")
     week_start, week_end = week_bounds(day)
     if FORCE_DEMO_DATA:
         wA, wB = demo_generate_week(week_start, week_end)
@@ -540,7 +530,7 @@ def page_dashboard_online():
 
     render_week_chart_grouped(wA, wB, week_start, week_end)
 
-    # --- Топ-10 дней урожая
+    # --- Топ-10 дней урожая (как был)
     st.markdown("### Топ-10 дней урожая за последние 31 день")
     render_top10_days(dfA_31, dfB_31)
 
@@ -561,7 +551,6 @@ def page_app():
 
 # ====== MAIN ======
 def main():
-    # Если нет ключей Supabase — открываем приложение без авторизации
     if not USE_SUPABASE:
         st.session_state["authed"] = True
         st.session_state["route"] = "app"
