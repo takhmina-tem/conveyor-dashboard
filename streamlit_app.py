@@ -4,6 +4,7 @@ import random
 from datetime import datetime, date, time, timedelta, timezone
 from typing import Optional
 from io import BytesIO
+import zipfile
 
 import streamlit as st
 import pandas as pd
@@ -190,20 +191,41 @@ def page_login():
             st.rerun()
     st.caption("Доступ выдаётся администраторами.")
 
-# ====== УТИЛИТА: Excel-выгрузка ======
-def make_excel_bytes(hour_df: pd.DataFrame, bins_df: pd.DataFrame) -> bytes:
-    buffer = BytesIO()
+# ====== УТИЛИТА: Excel-выгрузка с надёжным фолбэком ======
+def make_excel_bytes(hour_df: pd.DataFrame, bins_df: pd.DataFrame) -> tuple[bytes, str, str]:
+    """
+    Возвращает (bytes, ext, mime):
+      - ext = 'xlsx' при наличии xlsxwriter/openpyxl
+      - иначе ext = 'zip' (внутри два CSV)
+    """
+    # Пытаемся через xlsxwriter
     try:
-        with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
+        import xlsxwriter  # noqa: F401
+        buf = BytesIO()
+        with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
             hour_df.to_excel(writer, index=False, sheet_name="Поток по часам")
             bins_df.to_excel(writer, index=False, sheet_name="Категории")
-        return buffer.getvalue()
+        return buf.getvalue(), "xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     except Exception:
-        # запасной вариант (если xlsxwriter не установлен)
-        with pd.ExcelWriter(buffer) as writer:
+        pass
+
+    # Пытаемся через openpyxl
+    try:
+        import openpyxl  # noqa: F401
+        buf = BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
             hour_df.to_excel(writer, index=False, sheet_name="Поток по часам")
             bins_df.to_excel(writer, index=False, sheet_name="Категории")
-        return buffer.getvalue()
+        return buf.getvalue(), "xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    except Exception:
+        pass
+
+    # Фолбэк: ZIP с CSV
+    buf = BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("Поток по часам.csv", hour_df.to_csv(index=False))
+        zf.writestr("Категории.csv", bins_df.to_csv(index=False))
+    return buf.getvalue(), "zip", "application/zip"
 
 # ====== ЧАРТ ПО ЧАСАМ (STACKED: B внизу, (A-B) сверху; сумма = A) ======
 def render_hour_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame):
@@ -212,7 +234,7 @@ def render_hour_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame):
     merged = pd.merge(ha, hb, on="hour", how="outer").sort_values("hour")
     if merged.empty:
         st.info("Нет данных за выбранный период.")
-        return pd.DataFrame()  # вернём пустую для Excel-кнопки выше
+        return pd.DataFrame()
 
     merged[["initial", "collected"]] = merged[["initial", "collected"]].fillna(0).astype(int)
     merged["diff"] = (merged["initial"] - merged["collected"]).clip(lower=0)
@@ -289,7 +311,7 @@ def capital_calculator(bins_df: pd.DataFrame):
             )
 
     kg_totals = {cat: (counts.get(cat, 0) * weights_g.get(cat, 0.0)) / 1000.0 for cat in CATEGORIES}
-    subtotals = {cat: kg_totals[cat] * prices_kg.get(cat, 0.0) for c in CATEGORIES}
+    subtotals = {cat: kg_totals[cat] * prices_kg.get(cat, 0.0) for cat in CATEGORIES}
     total_sum = round(sum(subtotals.values()), 2)
 
     calc_df = pd.DataFrame({
@@ -336,7 +358,6 @@ def render_weight_table(day: date):
 
 # ====== ГЛАВНАЯ СТРАНИЦА ======
 def page_dashboard_online():
-    # Без подзаголовка
     header()
 
     c_top1, c_top2, c_top3 = st.columns([1.3,1,1])
@@ -345,7 +366,7 @@ def page_dashboard_online():
     with c_top2:
         st.empty()
     with c_top3:
-        top_right = st.container()  # сюда позже поставим кнопку выгрузки
+        top_right = st.container()  # сюда поставим кнопку выгрузки позже
         if st.button("Выйти"):
             st.session_state["authed"] = False
             go("login")
@@ -375,25 +396,22 @@ def page_dashboard_online():
     st.markdown("### Поток по часам")
     merged_hours = render_hour_chart_grouped(dfA, dfB)
 
-    # Кнопка экспорта (справа сверху) — после того, как есть данные
-    if not merged_hours.empty:
-        ha = hour_counts(dfA).rename(columns={"count": "Изначально (A)"})
-        hb = hour_counts(dfB).rename(columns={"count": "Итого (B)"})
-        hour_export = pd.merge(ha, hb, on="hour", how="outer").sort_values("hour")
-        hour_export = hour_export.fillna(0).rename(columns={"hour": "Дата и час"})
-        bins_df = bins_table(dfA, dfB)
+    # Подготовим данные для выгрузки и кнопку в правом верхнем углу
+    ha = hour_counts(dfA).rename(columns={"count": "Изначально (A)"})
+    hb = hour_counts(dfB).rename(columns={"count": "Итого (B)"})
+    hour_export = pd.merge(ha, hb, on="hour", how="outer").sort_values("hour")
+    hour_export = hour_export.fillna(0).rename(columns={"hour": "Дата и час"})
+    bins_df = bins_table(dfA, dfB)
 
-        excel_bytes = make_excel_bytes(hour_export, bins_df)
-        with top_right:
-            st.download_button(
-                label="⬇️ Скачать Excel",
-                data=excel_bytes,
-                file_name=f"potato_report_{day.isoformat()}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True
-            )
-    else:
-        bins_df = bins_table(dfA, dfB)  # чтобы не падало
+    file_bytes, ext, mime = make_excel_bytes(hour_export, bins_df)
+    with top_right:
+        st.download_button(
+            label="⬇️ Скачать отчёт" + (" (Excel)" if ext == "xlsx" else " (ZIP/CSV)"),
+            data=file_bytes,
+            file_name=f"potato_report_{day.isoformat()}." + ext,
+            mime=mime,
+            use_container_width=True
+        )
 
     # Pie chart
     st.markdown("### Структура за день")
@@ -402,7 +420,6 @@ def page_dashboard_online():
     # Таблица по категориям
     st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
     st.markdown("### Таблица по количеству")
-    bins_df = bins_table(dfA, dfB)
     df_view(bins_df[["Категория","Изначально","Потери (шт)","Собрано","% потери"]])
 
     # Весовая таблица (демо 4 строки)
