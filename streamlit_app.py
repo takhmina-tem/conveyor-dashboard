@@ -112,6 +112,15 @@ def hour_counts(df: pd.DataFrame) -> pd.DataFrame:
           .agg(count=("potato_id", "nunique"))
     )
 
+def day_counts(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or "ts" not in df.columns:
+        return pd.DataFrame({"day":[], "count":[]})
+    return (
+        df.assign(day=pd.to_datetime(df["ts"]).dt.floor("D"))
+          .groupby("day", as_index=False)
+          .agg(count=("potato_id", "nunique"))
+    )
+
 # ====== КАТЕГОРИИ ======
 CATEGORIES = ["<30", "30–40", "40–50", "50–60", ">60"]
 
@@ -167,6 +176,15 @@ def demo_generate(day: date, base: int = 620, jitter: int = 90, seed: int = 42):
             pid += 1
     return pd.DataFrame(rowsA), pd.DataFrame(rowsB)
 
+def demo_generate_range(ref_day: date, days: int = 31):
+    """Генерация демо-данных за последние `days` дней, включая ref_day."""
+    dfAs, dfBs = [], []
+    for d in range(days-1, -1, -1):
+        day_i = ref_day - timedelta(days=d)
+        a, b = demo_generate(day_i)
+        dfAs.append(a); dfBs.append(b)
+    return pd.concat(dfAs, ignore_index=True), pd.concat(dfBs, ignore_index=True)
+
 # ====== ЛОГИН (без повторного header) ======
 def page_login():
     st.subheader("Вход в систему")
@@ -191,7 +209,6 @@ def page_login():
             st.rerun()
     st.caption("Доступ выдаётся администраторами.")
 
-# ====== УТИЛИТА: Excel-выгрузка с надёжным фолбэком ======
 # ====== УТИЛИТА: Excel-выгрузка с авто-подбором ширины колонок ======
 def make_excel_bytes(hour_df: pd.DataFrame, bins_df: pd.DataFrame) -> tuple[bytes, str, str]:
     """
@@ -199,103 +216,63 @@ def make_excel_bytes(hour_df: pd.DataFrame, bins_df: pd.DataFrame) -> tuple[byte
       - ext = 'xlsx' при наличии xlsxwriter/openpyxl (с авто-шириной колонок)
       - иначе ext = 'zip' (внутри два CSV)
     """
-    # ---------- Попытка №1: xlsxwriter (лучше управляет форматами/шириной) ----------
+    # xlsxwriter
     try:
         import xlsxwriter  # noqa: F401
-
         buf = BytesIO()
         with pd.ExcelWriter(buf, engine="xlsxwriter", datetime_format="yyyy-mm-dd hh:mm") as writer:
-            # Листы
             hour_df.to_excel(writer, index=False, sheet_name="Поток по часам")
             bins_df.to_excel(writer, index=False, sheet_name="Категории")
 
             wb = writer.book
             ws_hours = writer.sheets["Поток по часам"]
             ws_bins  = writer.sheets["Категории"]
-
-            # Формат для даты/времени
             dt_fmt = wb.add_format({"num_format": "yyyy-mm-dd hh:mm"})
-
-            # --- авто-ширина для листа "Поток по часам"
             for col_idx, col_name in enumerate(hour_df.columns):
                 col_data = hour_df[col_name]
-                # Если столбец датавремени — учитываем формат и целевую длину
                 if pd.api.types.is_datetime64_any_dtype(col_data):
-                    # ширина под формат YYYY-MM-DD HH:MM
                     width = max(len(str(col_name)), 16) + 2
                     ws_hours.set_column(col_idx, col_idx, width, dt_fmt)
                 else:
-                    # максимальная длина текста по данным + заголовок
-                    max_len = max(
-                        len(str(col_name)),
-                        int(col_data.astype(str).map(len).max() or 0)
-                    )
+                    max_len = max(len(str(col_name)), int(col_data.astype(str).map(len).max() or 0))
                     ws_hours.set_column(col_idx, col_idx, max_len + 2)
-
-            # --- авто-ширина для листа "Категории"
             for col_idx, col_name in enumerate(bins_df.columns):
                 col_data = bins_df[col_name]
-                max_len = max(
-                    len(str(col_name)),
-                    int(col_data.astype(str).map(len).max() or 0)
-                )
+                max_len = max(len(str(col_name)), int(col_data.astype(str).map(len).max() or 0))
                 ws_bins.set_column(col_idx, col_idx, max_len + 2)
-
-        return (
-            buf.getvalue(),
-            "xlsx",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+        return buf.getvalue(), "xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     except Exception:
         pass
 
-    # ---------- Попытка №2: openpyxl ----------
+    # openpyxl
     try:
         import openpyxl  # noqa: F401
         from openpyxl.utils import get_column_letter
-
         buf = BytesIO()
         with pd.ExcelWriter(buf, engine="openpyxl", datetime_format="yyyy-mm-dd hh:mm") as writer:
             hour_df.to_excel(writer, index=False, sheet_name="Поток по часам")
             bins_df.to_excel(writer, index=False, sheet_name="Категории")
-
             wb = writer.book
             ws_hours = writer.sheets["Поток по часам"]
             ws_bins  = writer.sheets["Категории"]
-
-            # Авто-ширина + формат для дат
-            def autofit_openpyxl(ws, df: pd.DataFrame):
+            def autofit(ws, df):
                 for idx, col_name in enumerate(df.columns, start=1):
                     col_letter = get_column_letter(idx)
                     col_series = df[col_name]
-
                     if pd.api.types.is_datetime64_any_dtype(col_series):
-                        # ширина под "yyyy-mm-dd hh:mm"
                         width = max(len(str(col_name)), 16) + 2
                         ws.column_dimensions[col_letter].width = width
-                        # применим формат ко всем ячейкам в колонке (кроме заголовка)
                         for row in range(2, len(col_series) + 2):
-                            cell = ws[f"{col_letter}{row}"]
-                            cell.number_format = "yyyy-mm-dd hh:mm"
+                            ws[f"{col_letter}{row}"].number_format = "yyyy-mm-dd hh:mm"
                     else:
-                        max_len = max(
-                            len(str(col_name)),
-                            int(col_series.astype(str).map(len).max() or 0)
-                        )
+                        max_len = max(len(str(col_name)), int(col_series.astype(str).map(len).max() or 0))
                         ws.column_dimensions[col_letter].width = max_len + 2
-
-            autofit_openpyxl(ws_hours, hour_df)
-            autofit_openpyxl(ws_bins, bins_df)
-
-        return (
-            buf.getvalue(),
-            "xlsx",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+            autofit(ws_hours, hour_df); autofit(ws_bins, bins_df)
+        return buf.getvalue(), "xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     except Exception:
         pass
 
-    # ---------- Фолбэк: ZIP с CSV ----------
+    # ZIP/CSV фолбэк
     buf = BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("Поток по часам.csv", hour_df.to_csv(index=False))
@@ -331,16 +308,8 @@ def render_hour_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame):
         .encode(
             x=x_axis,
             y=alt.Y("Значение:Q", title="Количество", stack="zero"),
-            color=alt.Color(
-                "Сегмент:N",
-                title="",
-                scale=alt.Scale(domain=["Итого (B)", "Изначально (A)"])
-            ),
-            tooltip=[
-                alt.Tooltip("hour:T", title="Час"),
-                alt.Tooltip("Сегмент:N"),
-                alt.Tooltip("Значение:Q", title="В сегменте"),
-            ],
+            color=alt.Color("Сегмент:N", title="", scale=alt.Scale(domain=["Итого (B)", "Изначально (A)"])),
+            tooltip=[alt.Tooltip("hour:T", title="Час"), alt.Tooltip("Сегмент:N"), alt.Tooltip("Значение:Q", title="В сегменте")],
         )
         .properties(height=320, padding={"top": 10, "right": 12, "bottom": 44, "left": 8})
         .configure_axis(labelFontSize=12, titleFontSize=12)
@@ -350,8 +319,61 @@ def render_hour_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame):
     st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
     return merged
 
+# ====== ЧАРТ ПО ДНЯМ (STACKED: B внизу, (A-B) сверху; сумма = A) ======
+def render_day_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame):
+    da = day_counts(dfA).rename(columns={"count": "initial"})     # A по дням
+    db = day_counts(dfB).rename(columns={"count": "collected"})   # B по дням
+    merged = pd.merge(da, db, on="day", how="outer").sort_values("day")
+    if merged.empty:
+        st.info("Нет данных по дням.")
+        return pd.DataFrame()
+
+    merged[["initial", "collected"]] = merged[["initial", "collected"]].fillna(0).astype(int)
+    merged["diff"] = (merged["initial"] - merged["collected"]).clip(lower=0)
+
+    long_df = pd.concat([
+        merged[["day", "collected"]].rename(columns={"collected": "Значение"}).assign(Сегмент="Итого (B)"),
+        merged[["day", "diff"]].rename(columns={"diff": "Значение"}).assign(Сегмент="Изначально (A)"),
+    ], ignore_index=True)
+
+    chart = (
+        alt.Chart(long_df)
+        .mark_bar()
+        .encode(
+            x=alt.X("day:T", title="Дата", axis=alt.Axis(labelOverlap=True, titlePadding=20, labelAngle=0)),
+            y=alt.Y("Значение:Q", title="Количество", stack="zero"),
+            color=alt.Color("Сегмент:N", title="", scale=alt.Scale(domain=["Итого (B)", "Изначально (A)"])),
+            tooltip=[alt.Tooltip("day:T", title="Дата"), alt.Tooltip("Сегмент:N"), alt.Tooltip("Значение:Q", title="В сегменте")],
+        )
+        .properties(height=320, padding={"top": 10, "right": 12, "bottom": 44, "left": 8})
+        .configure_axis(labelFontSize=12, titleFontSize=12)
+    )
+    st.altair_chart(chart, use_container_width=True)
+    return merged
+
+# ====== ТОП-10 ДНЕЙ УРОЖАЯ (за последние 31 день, по B) ======
+def render_top10_days(dfA_31: pd.DataFrame, dfB_31: pd.DataFrame):
+    dB = day_counts(dfB_31)
+    if dB.empty:
+        st.info("Нет данных для топ-10 дней.")
+        return
+
+    top = dB.nlargest(10, "count").sort_values("count", ascending=True)  # для красивого горизонтального чарта
+    top["Дата"] = pd.to_datetime(top["day"]).dt.strftime("%Y-%m-%d")
+
+    chart = (
+        alt.Chart(top)
+        .mark_bar()
+        .encode(
+            x=alt.X("count:Q", title="Собрано (шт)"),
+            y=alt.Y("Дата:N", sort=None, title=""),
+            tooltip=[alt.Tooltip("Дата:N"), alt.Tooltip("count:Q", title="Собрано (шт)")],
+        )
+        .properties(height=28 * len(top) + 20)
+    )
+    st.altair_chart(chart, use_container_width=True)
+
 # ====== КАЛЬКУЛЯТОР КАПИТАЛА ======
-# Средние веса (можно менять вручную)
 DEFAULT_WEIGHT_G = {"<30": 20.0, "30–40": 48.0, "40–50": 83.0, "50–60": 130.0, ">60": 205.0}
 DEFAULT_PRICE_KG = {"<30": 0.0,  "30–40": 0.0,  "40–50": 0.0,  "50–60": 0.0,  ">60": 0.0}
 
@@ -386,7 +408,7 @@ def capital_calculator(bins_df: pd.DataFrame):
             )
 
     kg_totals = {cat: (counts.get(cat, 0) * weights_g.get(cat, 0.0)) / 1000.0 for cat in CATEGORIES}
-    subtotals = {cat: kg_totals[cat] * prices_kg.get(cat, 0.0) for cat in CATEGORIES}
+    subtotals = {cat: kg_totals[cat] * prices_kg.get(cat, 0.0) for c in CATEGORIES}
     total_sum = round(sum(subtotals.values()), 2)
 
     calc_df = pd.DataFrame({
@@ -400,29 +422,11 @@ def capital_calculator(bins_df: pd.DataFrame):
     df_view(calc_df)
     st.subheader(f"Итого капитал: **{total_sum:,.2f} тг**".replace(",", " "))
 
-# ====== PIE ЧАРТ ======
-def render_pie(initial_total: int, losses_total: int, collected_total: int):
-    pie_df = pd.DataFrame({
-        "Тип": ["Изначально", "Потери", "Собрано"],
-        "Значение": [initial_total, losses_total, collected_total],
-    })
-    chart = (
-        alt.Chart(pie_df)
-        .mark_arc()
-        .encode(
-            theta=alt.Theta("Значение:Q"),
-            color=alt.Color("Тип:N", title=""),
-            tooltip=["Тип:N", "Значение:Q"],
-        )
-        .properties(height=300)
-    )
-    st.altair_chart(chart, use_container_width=True)
-
 # ====== ВЕСОВАЯ ТАБЛИЦА (4 строки, демо) ======
 def render_weight_table(day: date):
     rng = random.Random(1000 + int(day.strftime("%Y%m%d")))
     hours = [10, 12, 14, 16]
-    weights = [round(rng.uniform(120, 220), 1) for _ in hours]  # кг
+    weights = [round(rng.uniform(0.12, 0.22), 3) for _ in hours]  # тонны
     rows = []
     for h, w in zip(hours, weights):
         ts = datetime.combine(day, time(h, 0))
@@ -441,13 +445,14 @@ def page_dashboard_online():
     with c_top2:
         st.empty()
     with c_top3:
-        top_right = st.container()  # сюда поставим кнопку выгрузки позже
+        top_right = st.container()
         if st.button("Выйти"):
             st.session_state["authed"] = False
             go("login")
 
     st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
 
+    # --- Данные за выбранный день
     start = datetime.combine(day, time.min).replace(tzinfo=timezone.utc)
     end   = datetime.combine(day, time.max).replace(tzinfo=timezone.utc)
 
@@ -459,6 +464,7 @@ def page_dashboard_online():
         if dfA.empty and dfB.empty:
             dfA, dfB = demo_generate(day)
 
+    # --- Ключевые метрики за день
     total_initial = dfA["potato_id"].nunique() if not dfA.empty else 0
     total_collected = dfB["potato_id"].nunique() if not dfB.empty else 0
     total_losses = max(0, total_initial - total_collected)
@@ -468,10 +474,11 @@ def page_dashboard_online():
     m2.metric("Потери (шт)", value=f"{total_losses}")
     m3.metric("Собрано (шт)", value=f"{total_collected}")
 
+    # --- Поток по часам (за выбранный день)
     st.markdown("### Поток по часам")
     merged_hours = render_hour_chart_grouped(dfA, dfB)
 
-    # Подготовим данные для выгрузки и кнопку в правом верхнем углу
+    # --- Готовим Excel и кнопку скачивания
     ha = hour_counts(dfA).rename(columns={"count": "Изначально (A)"})
     hb = hour_counts(dfB).rename(columns={"count": "Итого (B)"})
     hour_export = pd.merge(ha, hb, on="hour", how="outer").sort_values("hour")
@@ -488,19 +495,35 @@ def page_dashboard_online():
             use_container_width=True
         )
 
-    # Pie chart
-    st.markdown("### Структура за день")
-    render_pie(total_initial, total_losses, total_collected)
+    # --- Данные за последние 31 день (для дневного графика и топ-10)
+    start_31 = datetime.combine(day - timedelta(days=30), time.min).replace(tzinfo=timezone.utc)
+    end_31   = datetime.combine(day, time.max).replace(tzinfo=timezone.utc)
 
-    # Таблица по категориям
+    if FORCE_DEMO_DATA:
+        dfA_31, dfB_31 = demo_generate_range(day, days=31)
+    else:
+        dfA_31 = fetch_events("A", start_31, end_31)
+        dfB_31 = fetch_events("B", start_31, end_31)
+        if dfA_31.empty and dfB_31.empty:
+            dfA_31, dfB_31 = demo_generate_range(day, days=31)
+
+    # --- Поток по дням
+    st.markdown("### Поток по дням (последние 31 день)")
+    render_day_chart_grouped(dfA_31, dfB_31)
+
+    # --- Топ-10 дней урожая (по Собрано B)
+    st.markdown("### Топ-10 дней урожая за последние 31 день")
+    render_top10_days(dfA_31, dfB_31)
+
+    # --- Таблица по категориям (за выбранный день)
     st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
     st.markdown("### Таблица по количеству")
     df_view(bins_df[["Категория","Изначально","Потери (шт)","Собрано","% потери"]])
 
-    # Весовая таблица (демо 4 строки)
+    # --- Весовая таблица (демо 4 строки)
     render_weight_table(day)
 
-    # Калькулятор
+    # --- Калькулятор
     capital_calculator(bins_df)
 
 # ====== APP (без вкладок) ======
