@@ -10,6 +10,15 @@ import streamlit as st
 import pandas as pd
 import altair as alt
 
+from zoneinfo import ZoneInfo
+TZ = ZoneInfo("Asia/Aqtobe")  # GMT+5 (можно заменить на нужный TZ)
+
+def local_day_bounds_to_utc(d: date) -> tuple[datetime, datetime]:
+    start_local = datetime.combine(d, time.min).replace(tzinfo=TZ)
+    end_local   = datetime.combine(d, time.max).replace(tzinfo=TZ)
+    return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
+
+
 # ====== РЕЖИМ ДЕМО ДАННЫХ (НЕ ВЛИЯЕТ НА АВТОРИЗАЦИЮ) ======
 FORCE_DEMO_DATA = False  # ← читаем реальные данные из БД
 
@@ -88,7 +97,7 @@ def week_bounds(d: date) -> tuple[date, date]:
     return start, end
 
 # ====== ЧТЕНИЕ ДАННЫХ (если USE_SUPABASE=True) ======
-def fetch_events(point: Optional[str], start_dt: datetime, end_dt: datetime) -> pd.DataFrame:
+def fetch_events(point: Optional[str], start_dt: datetime, end_dt: datetime, batch: Optional[str] = None) -> pd.DataFrame:
     """Возвращает ts (naive UTC), point, potato_id, width_cm, height_cm."""
     if not USE_SUPABASE:
         return pd.DataFrame(columns=["ts","point","potato_id","width_cm","height_cm"])
@@ -96,6 +105,8 @@ def fetch_events(point: Optional[str], start_dt: datetime, end_dt: datetime) -> 
         q = _sb.table("events").select("*").order("ts", desc=False)
         if point:
             q = q.eq("point", point)
+        if batch:
+            q = q.eq("batch", batch)
         start_iso = _ensure_aware_utc(start_dt).isoformat()
         end_iso   = _ensure_aware_utc(end_dt).isoformat()
         data = q.gte("ts", start_iso).lte("ts", end_iso).execute().data
@@ -114,8 +125,11 @@ def fetch_events(point: Optional[str], start_dt: datetime, end_dt: datetime) -> 
 def hour_counts(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty or "ts" not in df.columns:
         return pd.DataFrame({"hour":[], "count":[]})
+    ts_local = (pd.to_datetime(df["ts"], utc=True, errors="coerce")
+                  .dt.tz_convert(TZ))
     return (
-        df.assign(hour=pd.to_datetime(df["ts"]).dt.floor("h"))
+        pd.DataFrame({"ts_local": ts_local, "potato_id": df["potato_id"]})
+          .assign(hour=lambda x: x["ts_local"].dt.floor("h"))
           .groupby("hour", as_index=False)
           .agg(count=("potato_id", "nunique"))
     )
@@ -123,11 +137,15 @@ def hour_counts(df: pd.DataFrame) -> pd.DataFrame:
 def day_counts(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty or "ts" not in df.columns:
         return pd.DataFrame({"day":[], "count":[]})
+    ts_local = (pd.to_datetime(df["ts"], utc=True, errors="coerce")
+                  .dt.tz_convert(TZ))
     return (
-        df.assign(day=pd.to_datetime(df["ts"]).dt.floor("D"))
+        pd.DataFrame({"ts_local": ts_local, "potato_id": df["potato_id"]})
+          .assign(day=lambda x: x["ts_local"].dt.floor("D"))
           .groupby("day", as_index=False)
           .agg(count=("potato_id", "nunique"))
     )
+
 
 # ====== КАТЕГОРИИ ======
 CATEGORIES = ["<30", "30–40", "40–50", "50–60", ">60"]
@@ -474,7 +492,11 @@ def page_dashboard_online():
     with c_top1:
         st.date_input("Дата", key="day_picker")  # без value=..., используем session_state
     with c_top2:
-        st.empty()
+        # фильтр по batch
+        batch_tag = st.text_input("batch-тег (необязательно)", value="")
+        # простая кнопка ручного обновления
+        if st.button("Обновить данные"):
+            st.experimental_rerun()
     with c_top3:
         top_right = st.container()
         if st.button("Выйти"):
@@ -483,16 +505,15 @@ def page_dashboard_online():
 
     st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
 
-    # --- Данные за выбранный день
+    # --- Данные за выбранный день (локальный день → UTC-диапазон)
     day = st.session_state["day_picker"]
-    start = datetime.combine(day, time.min).replace(tzinfo=timezone.utc)
-    end   = datetime.combine(day, time.max).replace(tzinfo=timezone.utc)
+    start, end = local_day_bounds_to_utc(day)
 
     if FORCE_DEMO_DATA:
         dfA, dfB = demo_generate(day)
     else:
-        dfA = fetch_events("A", start, end)
-        dfB = fetch_events("B", start, end)
+        dfA = fetch_events("A", start, end, batch=batch_tag or None)
+        dfB = fetch_events("B", start, end, batch=batch_tag or None)
         if dfA.empty and dfB.empty:
             st.info("Нет данных за выбранный день.")
             st.stop()
@@ -507,11 +528,11 @@ def page_dashboard_online():
     m2.metric("Потери (шт)", value=f"{total_losses}")
     m3.metric("Собрано (шт)", value=f"{total_collected}")
 
-    # --- Поток по часам (как был)
+    # --- Поток по часам
     st.markdown("### Поток по часам")
     merged_hours = render_hour_chart_grouped(dfA, dfB)
 
-    # --- Excel (часа + категории)
+    # --- Excel (часы + категории)
     ha = hour_counts(dfA).rename(columns={"count": "Изначально (A)"})
     hb = hour_counts(dfB).rename(columns={"count": "Итого (B)"})
     hour_export = pd.merge(ha, hb, on="hour", how="outer").sort_values("hour")
@@ -528,27 +549,28 @@ def page_dashboard_online():
             use_container_width=True
         )
 
-    # --- Данные за последние 31 день (для топ-10)
-    start_31 = datetime.combine(day - timedelta(days=30), time.min).replace(tzinfo=timezone.utc)
-    end_31   = datetime.combine(day, time.max).replace(tzinfo=timezone.utc)
+    # --- Данные за последние 31 день (для топ-10) — без batch-фильтра (обзорно)
+    start_31_local = day - timedelta(days=30)
+    start_31_utc, end_31_utc = local_day_bounds_to_utc(start_31_local)
+    _, end_today_utc = local_day_bounds_to_utc(day)
 
     if FORCE_DEMO_DATA:
         dfA_31, dfB_31 = demo_generate_range(day, days=31)
     else:
-        dfA_31 = fetch_events("A", start_31, end_31)
-        dfB_31 = fetch_events("B", start_31, end_31)
+        dfA_31 = fetch_events("A", start_31_utc, end_today_utc)
+        dfB_31 = fetch_events("B", start_31_utc, end_today_utc)
 
-    # --- Поток по неделям (с навигацией и русскими днями)
+    # --- Поток по неделям (локальная неделя)
     st.markdown("### Поток по неделям")
     week_start, week_end = week_bounds(day)
     if FORCE_DEMO_DATA:
         wA, wB = demo_generate_week(week_start, week_end)
         render_week_chart_grouped(wA, wB, week_start, week_end)
     else:
-        ws_dt = datetime.combine(week_start, time.min).replace(tzinfo=timezone.utc)
-        we_dt = datetime.combine(week_end,   time.max).replace(tzinfo=timezone.utc)
-        wA = fetch_events("A", ws_dt, we_dt)
-        wB = fetch_events("B", ws_dt, we_dt)
+        ws_utc, _ = local_day_bounds_to_utc(week_start)
+        _, we_utc = local_day_bounds_to_utc(week_end)
+        wA = fetch_events("A", ws_utc, we_utc)
+        wB = fetch_events("B", ws_utc, we_utc)
         if wA.empty and wB.empty:
             st.info("Нет данных за выбранную неделю.")
         else:
@@ -570,7 +592,7 @@ def page_dashboard_online():
     df_view(bins_df[["Категория","Изначально","Потери (шт)","Собрано","% потери"]])
 
     # --- Весовая таблица (демо 4 строки)
-    render_weight_table(day)  # это демонстрационный блок, при необходимости убери
+    render_weight_table(day)  # это демонстрационный блок, при необходимости уберите
 
     # --- Калькулятор
     capital_calculator(bins_df)
