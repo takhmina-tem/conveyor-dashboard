@@ -124,27 +124,29 @@ def fetch_events(point: Optional[str], start_dt: datetime, end_dt: datetime, bat
 
 def hour_counts(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty or "ts" not in df.columns:
-        return pd.DataFrame({"hour":[], "count":[]})
+        return pd.DataFrame({"hour": [], "count": []})
     ts_local = (pd.to_datetime(df["ts"], utc=True, errors="coerce")
                   .dt.tz_convert(TZ))
+    hours_naive = ts_local.dt.floor("h").dt.tz_localize(None)  # <-- убрать TZ
     return (
-        pd.DataFrame({"ts_local": ts_local, "potato_id": df["potato_id"]})
-          .assign(hour=lambda x: x["ts_local"].dt.floor("h"))
+        pd.DataFrame({"hour": hours_naive, "potato_id": df["potato_id"]})
           .groupby("hour", as_index=False)
           .agg(count=("potato_id", "nunique"))
     )
 
+
 def day_counts(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty or "ts" not in df.columns:
-        return pd.DataFrame({"day":[], "count":[]})
+        return pd.DataFrame({"day": [], "count": []})
     ts_local = (pd.to_datetime(df["ts"], utc=True, errors="coerce")
                   .dt.tz_convert(TZ))
+    days_naive = ts_local.dt.floor("D").dt.tz_localize(None)  # <-- убрать TZ
     return (
-        pd.DataFrame({"ts_local": ts_local, "potato_id": df["potato_id"]})
-          .assign(day=lambda x: x["ts_local"].dt.floor("D"))
+        pd.DataFrame({"day": days_naive, "potato_id": df["potato_id"]})
           .groupby("day", as_index=False)
           .agg(count=("potato_id", "nunique"))
     )
+
 
 
 # ====== КАТЕГОРИИ ======
@@ -371,10 +373,14 @@ def render_week_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame, week_start: 
         "dow": list(range(7)),
     })
 
-    da["day"] = pd.to_datetime(da["day"]).dt.floor("D")
-    db["day"] = pd.to_datetime(db["day"]).dt.floor("D")
+    da["day"] = pd.to_datetime(da["day"]).dt.tz_localize(None)
+    db["day"] = pd.to_datetime(db["day"]).dt.tz_localize(None)
 
-    merged = base.merge(da, on="day", how="left").merge(db, on="day", how="left", suffixes=("", "_b"))
+    merged = (
+        base.merge(da, on="day", how="left")
+            .merge(db, on="day", how="left", suffixes=("", "_b"))
+    )
+    
     merged[["initial", "collected"]] = merged[["initial", "collected"]].fillna(0).astype(int)
     merged["diff"] = (merged["initial"] - merged["collected"]).clip(lower=0)
     merged["День"] = merged["dow"].map(lambda i: RU_DOW[i])
