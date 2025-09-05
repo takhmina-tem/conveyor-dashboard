@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 TZ = ZoneInfo("Asia/Aqtobe")  # только для внутренних конверсий
 TARGET_DAY_LOCAL   = date(2025, 9, 4)  # "вчера"
 TARGET_START_HOUR  = 14
-TARGET_END_HOUR    = 19   # правая граница (итого 5 часов: 14..18)
+TARGET_END_HOUR    = 19   # итог: показываем 14,15,16,17,18
 LIVE_MINUTES       = 60   # берём последние 60 минут из БД
 
 # ===== Страница =====
@@ -52,10 +52,17 @@ def header():
         unsafe_allow_html=True
     )
     st.markdown("<hr/>", unsafe_allow_html=True)
-    # Кнопка обновления — чуть ниже заголовка
+    # Кнопка обновления — ниже заголовка
     if st.button("↻ Обновить страницу", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
+    # Автообновление (раз в ~5–10 сек)
+    try:
+        from streamlit_autorefresh import st_autorefresh
+        st_autorefresh(interval=5000, key="auto_refresh_5s")
+    except Exception:
+        # fallback, если плагина нет
+        st.markdown("<meta http-equiv='refresh' content='10'>", unsafe_allow_html=True)
 
 # ===== Время/конверсии =====
 def to_aware_utc(dt: datetime) -> datetime:
@@ -71,8 +78,7 @@ def live_window_utc(minutes: int = LIVE_MINUTES) -> tuple[datetime, datetime]:
     now_utc = datetime.utcnow().replace(tzinfo=timezone.utc)
     return now_utc - timedelta(minutes=minutes), now_utc
 
-# ===== Чтение данных =====
-@st.cache_data(ttl=5)
+# ===== Чтение данных (без кэша -> всегда свежие) =====
 def fetch_events(point: Optional[str], start_dt: datetime, end_dt: datetime) -> pd.DataFrame:
     """Возвращает ts (UTC-aware), point, potato_id, width_cm/height_cm или width/height (в см)."""
     if not USE_SUPABASE:
@@ -133,23 +139,19 @@ def bins_table_mm_collected(df: pd.DataFrame) -> pd.DataFrame:
 
 # ===== «Вчерашние» часы (фиксированная ось: 14..18) =====
 def fixed_target_hours_index() -> pd.DatetimeIndex:
-    # создаём 5 часов: 14:00, 15:00, 16:00, 17:00, 18:00 (локальное время)
+    # 14:00, 15:00, 16:00, 17:00, 18:00 локально -> без TZ для красивой оси
     hours_local = [datetime.combine(TARGET_DAY_LOCAL, dtime(h)) for h in range(TARGET_START_HOUR, TARGET_END_HOUR)]
-    # показывать красиво без TZ
     return pd.DatetimeIndex(pd.to_datetime(hours_local)).tz_localize(None)
 
-# ===== Перенос live-данных в «вчерашнее» окно =====
+# ===== Перенос live-данных в «вчерашний» час 14:00–15:00 =====
 def remap_live_to_target(df: pd.DataFrame, live_start_utc: datetime) -> pd.DataFrame:
     """
-    Каждому событию присваиваем «виртуальный» ts_disp так:
-    - все события из последних 60 минут отображаем в часе 14:00–15:00 вчера.
-    Ось графика при этом фиксированная: 14..18, пустые часы = 0.
+    Все события из последних 60 минут отображаем как 4 сент 14:00..15:00.
+    Ось графика фиксированная (14..18): остальные часы показываются как 0, пока не решим маппить последующие live-часы.
     """
     if df.empty or "ts" not in df.columns:
         return df
-    # нормализуем к началу live-часа
     offs = (df["ts"] - live_start_utc).dt.total_seconds().clip(lower=0)
-    # «виртуальная» точка старта: 4 сент 14:00 локально → UTC
     target_start_utc = local_to_utc(TARGET_DAY_LOCAL, TARGET_START_HOUR)
     df = df.copy()
     df["ts_disp"] = target_start_utc + pd.to_timedelta(offs, unit="s")
@@ -157,12 +159,10 @@ def remap_live_to_target(df: pd.DataFrame, live_start_utc: datetime) -> pd.DataF
 
 # ===== Агрегация «Собрано по часам» с заполнением пустых часов =====
 def hour_counts_collected_fixed(df_disp: pd.DataFrame) -> pd.DataFrame:
-    # База часов (локальные, без TZ для оси)
     base_hours = fixed_target_hours_index()
     if df_disp.empty or "ts_disp" not in df_disp.columns:
         return pd.DataFrame({"hour": base_hours, "Собрано (шт)": [0]*len(base_hours)})
 
-    # для подсчёта переводим ts_disp в локальное → округляем до часа → без TZ
     ts_local = df_disp["ts_disp"].dt.tz_convert(TZ)
     hours_naive = ts_local.dt.floor("h").dt.tz_localize(None)
     g = (
@@ -170,7 +170,6 @@ def hour_counts_collected_fixed(df_disp: pd.DataFrame) -> pd.DataFrame:
         .groupby("hour", as_index=False)
         .agg(**{"Собрано (шт)": ("potato_id", "nunique")})
     )
-    # джоиним к базе часов, чтобы показать 0 там, где нет данных
     out = pd.DataFrame({"hour": base_hours}).merge(g, on="hour", how="left")
     out["Собрано (шт)"] = out["Собрано (шт)"].fillna(0).astype(int)
     return out
@@ -219,9 +218,9 @@ def make_excel_bytes(hour_df: pd.DataFrame, bins_df: pd.DataFrame) -> tuple[byte
         zf.writestr("bins_mm.csv",  bins_df.to_csv(index=False))
     return buf.getvalue(), "zip", "application/zip"
 
-# ===== Калькулятор капитала (по категориям мм) =====
-DEFAULT_WEIGHT_G = {"<30 мм": 20.0, "30–40 мм": 48.0, "40–50 мм": 83.0, "50–60 мм": 130.0, ">60 мм": 205.0}
-DEFAULT_PRICE_KG = {"<30 мм": 0.0,  "30–40 мм": 0.0,  "40–50 мм": 0.0,  "50–60 мм": 0.0,  ">60 мм": 0.0}
+# ===== Калькулятор капитала (всё с нулей) =====
+DEFAULT_WEIGHT_G = {"<30 мм": 0.0, "30–40 мм": 0.0, "40–50 мм": 0.0, "50–60 мм": 0.0, ">60 мм": 0.0}
+DEFAULT_PRICE_KG = {"<30 мм": 0.0, "30–40 мм": 0.0, "40–50 мм": 0.0, "50–60 мм": 0.0, ">60 мм": 0.0}
 
 def capital_calculator_mm(bins_df: pd.DataFrame):
     st.markdown("### Калькулятор капитала")
@@ -237,7 +236,7 @@ def capital_calculator_mm(bins_df: pd.DataFrame):
             weights_g[cat] = st.number_input(
                 f"Вес ({cat}), г/шт",
                 min_value=0.0,
-                step=10.0,
+                step=1.0,
                 value=float(DEFAULT_WEIGHT_G.get(cat, 0.0)),
                 format="%.2f",
                 key=f"calc_w_{cat}",
@@ -246,7 +245,7 @@ def capital_calculator_mm(bins_df: pd.DataFrame):
             prices_kg[cat] = st.number_input(
                 f"Цена ({cat}), тг/кг",
                 min_value=0.0,
-                step=10.0,
+                step=1.0,
                 value=float(DEFAULT_PRICE_KG.get(cat, 0.0)),
                 format="%.2f",
                 key=f"calc_p_{cat}",
@@ -292,11 +291,11 @@ def page_dashboard():
     # 2) Переносим эти события в «вчерашний» 14:00–15:00
     df_disp = remap_live_to_target(df_live, live_start_utc)
 
-    # 3) Метрика «Собрано (шт)»
+    # 3) Метрика «Собрано (шт)» — в рил-тайме
     collected_total = df_disp["potato_id"].nunique() if not df_disp.empty else 0
     st.metric("Собрано (шт)", value=f"{collected_total}")
 
-    # 4) Поток по часам (фиксированная ось 14..18 — дальше часы покажутся нулями)
+    # 4) Поток по часам (фиксированная ось 14..18 — пустые часы = 0)
     st.markdown("### Поток по часам")
     hc = render_hour_chart_fixed(df_disp)
 
@@ -316,7 +315,7 @@ def page_dashboard():
         use_container_width=True
     )
 
-    # 7) Калькулятор капитала
+    # 7) Калькулятор капитала (значения с нуля)
     capital_calculator_mm(bins_df)
 
     # 8) Весовая таблица (демо)
