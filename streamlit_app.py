@@ -345,6 +345,7 @@ RU_DOW = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 def _shift_week(delta_days: int):
     # callback для кнопок навигации
     st.session_state["day_picker"] = st.session_state["day_picker"] + timedelta(days=delta_days)
+    
 def render_week_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame, week_start: date, week_end: date):
     # Панель навигации неделями (кнопки "<" и ">")
     nav_left, nav_center, nav_right = st.columns([1, 2, 1])
