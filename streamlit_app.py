@@ -1,7 +1,8 @@
 # streamlit_app.py
 import os
+import time
 import random
-from datetime import datetime, date, time, timedelta, timezone
+from datetime import datetime, date, time as dtime, timedelta, timezone
 from typing import Optional
 from io import BytesIO
 import zipfile
@@ -11,16 +12,25 @@ import pandas as pd
 import altair as alt
 
 from zoneinfo import ZoneInfo
-TZ = ZoneInfo("Asia/Aqtobe")  # GMT+5 (можно заменить на нужный TZ)
+TZ = ZoneInfo("Asia/Aqtobe")  # GMT+5 (замени при необходимости)
 
+
+# ====== УТИЛЫ ВРЕМЕНИ ======
 def local_day_bounds_to_utc(d: date) -> tuple[datetime, datetime]:
-    start_local = datetime.combine(d, time.min).replace(tzinfo=TZ)
-    end_local   = datetime.combine(d, time.max).replace(tzinfo=TZ)
+    start_local = datetime.combine(d, dtime.min).replace(tzinfo=TZ)
+    end_local   = datetime.combine(d, dtime.max).replace(tzinfo=TZ)
     return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
 
+def _ensure_aware_utc(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
-# ====== РЕЖИМ ДЕМО ДАННЫХ (НЕ ВЛИЯЕТ НА АВТОРИЗАЦИЮ) ======
-FORCE_DEMO_DATA = False  # ← читаем реальные данные из БД
+def week_bounds(d: date) -> tuple[date, date]:
+    start = d - timedelta(days=d.weekday())
+    end = start + timedelta(days=6)
+    return start, end
+
 
 # ====== БАЗОВЫЕ НАСТРОЙКИ ======
 st.set_page_config(
@@ -32,6 +42,7 @@ st.set_page_config(
 # ====== КЛЮЧИ (через .streamlit/secrets.toml или env) ======
 SUPABASE_URL = st.secrets.get("SUPABASE_URL", os.getenv("SUPABASE_URL"))
 SUPABASE_ANON_KEY = st.secrets.get("SUPABASE_ANON_KEY", os.getenv("SUPABASE_ANON_KEY"))
+DEFAULT_BATCH = st.secrets.get("DEFAULT_BATCH", os.getenv("DEFAULT_BATCH", ""))  # удобно автоподставлять текущий запуск
 
 USE_SUPABASE = bool(SUPABASE_URL and SUPABASE_ANON_KEY)
 _sb = None
@@ -72,35 +83,26 @@ def df_view(df: pd.DataFrame, caption: str = ""):
         st.caption(caption)
     st.dataframe(df, use_container_width=True)
 
+
 # ====== СЕССИЯ/РОУТЕР ======
 if "authed" not in st.session_state:
     st.session_state["authed"] = False
 if "route" not in st.session_state:
-    st.session_state["route"] = "login"  # 'login' | 'app'
+    st.session_state["route"] = "app"  # сразу в приложение
 if "day_picker" not in st.session_state:
-    st.session_state["day_picker"] = date.today()  # инициализация
+    st.session_state["day_picker"] = date.today()
 
 def go(page: str):
     st.session_state["route"] = page
     st.rerun()
 
-# ====== ДАТЫ ======
-def _ensure_aware_utc(dt: datetime) -> datetime:
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
 
-def week_bounds(d: date) -> tuple[date, date]:
-    """Понедельник..Воскресенье для даты d."""
-    start = d - timedelta(days=d.weekday())
-    end = start + timedelta(days=6)
-    return start, end
-
-# ====== ЧТЕНИЕ ДАННЫХ (если USE_SUPABASE=True) ======
+# ====== ЧТЕНИЕ ДАННЫХ (кэш с TTL для почти realtime) ======
+@st.cache_data(ttl=5)  # каждые ~5 сек будут подтягиваться свежие данные
 def fetch_events(point: Optional[str], start_dt: datetime, end_dt: datetime, batch: Optional[str] = None) -> pd.DataFrame:
-    """Возвращает ts (naive UTC), point, potato_id, width_cm, height_cm."""
+    """Возвращает ts (naive UTC), point, potato_id, width_cm, height_cm (+ batch)."""
     if not USE_SUPABASE:
-        return pd.DataFrame(columns=["ts","point","potato_id","width_cm","height_cm"])
+        return pd.DataFrame(columns=["ts","point","potato_id","width_cm","height_cm","batch"])
     try:
         q = _sb.table("events").select("*").order("ts", desc=False)
         if point:
@@ -110,7 +112,7 @@ def fetch_events(point: Optional[str], start_dt: datetime, end_dt: datetime, bat
         start_iso = _ensure_aware_utc(start_dt).isoformat()
         end_iso   = _ensure_aware_utc(end_dt).isoformat()
         data = q.gte("ts", start_iso).lte("ts", end_iso).execute().data
-        df = pd.DataFrame(data) if data else pd.DataFrame(columns=["ts","point","potato_id","width_cm","height_cm"])
+        df = pd.DataFrame(data) if data else pd.DataFrame(columns=["ts","point","potato_id","width_cm","height_cm","batch"])
         if "ts" in df.columns:
             df["ts"] = pd.to_datetime(df["ts"], utc=True, errors="coerce")\
                           .dt.tz_convert("UTC").dt.tz_localize(None)
@@ -120,33 +122,33 @@ def fetch_events(point: Optional[str], start_dt: datetime, end_dt: datetime, bat
         return df
     except Exception as e:
         st.warning(f"Ошибка чтения из Supabase: {e}")
-        return pd.DataFrame(columns=["ts","point","potato_id","width_cm","height_cm"])
+        return pd.DataFrame(columns=["ts","point","potato_id","width_cm","height_cm","batch"])
 
+
+# ====== АГРЕГАЦИИ ======
 def hour_counts(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty or "ts" not in df.columns:
         return pd.DataFrame({"hour": [], "count": []})
     ts_local = (pd.to_datetime(df["ts"], utc=True, errors="coerce")
-                  .dt.tz_convert(TZ))
-    hours_naive = ts_local.dt.floor("h").dt.tz_localize(None)  # <-- убрать TZ
+                  .dt.tz_localize("UTC").dt.tz_convert(TZ))
+    hours_naive = ts_local.dt.floor("h").dt.tz_localize(None)
     return (
         pd.DataFrame({"hour": hours_naive, "potato_id": df["potato_id"]})
           .groupby("hour", as_index=False)
           .agg(count=("potato_id", "nunique"))
     )
 
-
 def day_counts(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty or "ts" not in df.columns:
         return pd.DataFrame({"day": [], "count": []})
     ts_local = (pd.to_datetime(df["ts"], utc=True, errors="coerce")
-                  .dt.tz_convert(TZ))
-    days_naive = ts_local.dt.floor("D").dt.tz_localize(None)  # <-- убрать TZ
+                  .dt.tz_localize("UTC").dt.tz_convert(TZ))
+    days_naive = ts_local.dt.floor("D").dt.tz_localize(None)
     return (
         pd.DataFrame({"day": days_naive, "potato_id": df["potato_id"]})
           .groupby("day", as_index=False)
           .agg(count=("potato_id", "nunique"))
     )
-
 
 
 # ====== КАТЕГОРИИ ======
@@ -166,8 +168,8 @@ def bins_table(dfA: pd.DataFrame, dfB: pd.DataFrame) -> pd.DataFrame:
         vc = cut.value_counts().reindex(labels).fillna(0).astype(int)
         return vc
 
-    A = count_bins(dfA)   # Изначально (A)
-    B = count_bins(dfB)   # Собрано   (B)
+    A = count_bins(dfA)
+    B = count_bins(dfB)
     losses = (A - B).clip(lower=0)
     loss_pct = pd.Series({c: (0.0 if A[c]==0 else round(losses[c]/A[c]*100, 1)) for c in CATEGORIES})
 
@@ -179,10 +181,11 @@ def bins_table(dfA: pd.DataFrame, dfB: pd.DataFrame) -> pd.DataFrame:
         "% потери":     [float(loss_pct[c]) for c in CATEGORIES],
     })
 
-# ====== ДЕМО-ДАННЫЕ ======
+
+# ====== ДЕМО-ДАННЫЕ (оставим — вдруг пригодится оффлайн) ======
 def demo_generate(day: date, base: int = 620, jitter: int = 90, seed: int = 42):
     rng = random.Random(seed + int(day.strftime("%Y%m%d")))
-    hours = [datetime.combine(day, time(h,0)) for h in range(24)]
+    hours = [datetime.combine(day, dtime(h,0)) for h in range(24)]
     rowsA, rowsB = [], []
     pid = 1
     for ts in hours:
@@ -206,40 +209,168 @@ def demo_generate_range(ref_day: date, days: int = 31):
         dfAs.append(a); dfBs.append(b)
     return pd.concat(dfAs, ignore_index=True), pd.concat(dfBs, ignore_index=True)
 
-def demo_generate_week(week_start: date, week_end: date):
-    dfAs, dfBs = [], []
-    cur = week_start
-    while cur <= week_end:
-        a, b = demo_generate(cur)
-        dfAs.append(a); dfBs.append(b)
-        cur += timedelta(days=1)
-    return pd.concat(dfAs, ignore_index=True), pd.concat(dfBs, ignore_index=True)
 
-# ====== ЛОГИН (минимальный; используется только если USE_SUPABASE=True) ======
-def page_login():
-    st.subheader("Вход в систему")
-    with st.form("login_form", clear_on_submit=False):
-        email = st.text_input("E-mail", placeholder="you@company.com")
-        password = st.text_input("Пароль", type="password", placeholder="••••••••")
-        submitted = st.form_submit_button("Войти")
-    if submitted:
-        ok = True
-        if USE_SUPABASE:
-            try:
-                resp = _sb.auth.sign_in_with_password({"email": email, "password": password})
-                ok = bool(getattr(resp, "user", None))
-                if not ok:
-                    st.error("Неверная почта или пароль.")
-            except Exception as e:
-                st.error(f"Ошибка авторизации: {e}")
-                ok = False
-        if ok:
-            st.session_state["authed"] = True
-            st.session_state["route"] = "app"
+# ====== ЧАРТЫ ======
+def render_hour_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame):
+    ha = hour_counts(dfA).rename(columns={"count": "initial"})
+    hb = hour_counts(dfB).rename(columns={"count": "collected"})
+    merged = pd.merge(ha, hb, on="hour", how="outer").sort_values("hour")
+    if merged.empty:
+        st.info("Нет данных за выбранный период.")
+        return pd.DataFrame()
+
+    merged[["initial", "collected"]] = merged[["initial", "collected"]].fillna(0).astype(int)
+    merged["diff"] = (merged["initial"] - merged["collected"]).clip(lower=0)
+
+    long_df = pd.concat([
+        merged[["hour", "collected"]].rename(columns={"collected": "Значение"}).assign(Сегмент="Итого (B)"),
+        merged[["hour", "diff"]].rename(columns={"diff": "Значение"}).assign(Сегмент="Изначально (A)"),
+    ], ignore_index=True)
+
+    x_axis = alt.X(
+        "hour:T",
+        title="Дата и час",
+        axis=alt.Axis(titlePadding=24, labelOverlap=True, labelFlush=True, titleAnchor="start"),
+    )
+
+    chart = (
+        alt.Chart(long_df)
+        .mark_bar()
+        .encode(
+            x=x_axis,
+            y=alt.Y("Значение:Q", title="Количество", stack="zero"),
+            color=alt.Color("Сегмент:N", title="", scale=alt.Scale(domain=["Итого (B)", "Изначально (A)"])),
+            tooltip=[alt.Tooltip("hour:T", title="Час"), alt.Tooltip("Сегмент:N"), alt.Tooltip("Значение:Q", title="В сегменте")],
+        )
+        .properties(height=320, padding={"top": 10, "right": 12, "bottom": 44, "left": 8})
+        .configure_axis(labelFontSize=12, titleFontSize=12)
+    )
+
+    st.altair_chart(chart, use_container_width=True)
+    st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+    return merged
+
+
+# ====== ГЛАВНАЯ: Live + Daily ======
+def page_dashboard_online():
+    header()
+
+    # ---- верхняя панель
+    c1, c2, c3, c4 = st.columns([1.2, 1, 1, 1.2])
+
+    with c1:
+        # live-фильтр по batch (очень удобно отсеять старые тесты)
+        batch_tag = st.text_input("batch-тег (рекомендуется)", value=DEFAULT_BATCH or "")
+    with c2:
+        auto_refresh = st.toggle("Автообновлять", value=True, help="Автоматически перезапускать с заданным интервалом")
+    with c3:
+        refresh_sec = st.number_input("Интервал, сек", min_value=2, max_value=60, value=5, step=1)
+    with c4:
+        if st.button("Обновить данные"):
+            st.cache_data.clear()
             st.rerun()
-    st.caption("Доступ выдаётся администраторами.")
 
-# ====== УТИЛИТА: Excel-выгрузка с авто-подбором ширины колонок ======
+    # статус подключения
+    if USE_SUPABASE:
+        try:
+            _sb.table("events").select("potato_id").limit(1).execute()
+            st.caption("✅ Подключение к Supabase: OK")
+        except Exception as e:
+            st.warning(f"⚠️ Supabase не отвечает: {e}")
+
+    st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+
+    # ==== LIVE РЕЖИМ (по умолчанию: последний час) ====
+    st.subheader("Live: последние N минут")
+    live_minutes = st.slider("Окно (мин)", min_value=5, max_value=180, value=60, step=5)
+    now_utc = datetime.utcnow().replace(tzinfo=timezone.utc)
+    live_start = now_utc - timedelta(minutes=live_minutes)
+
+    dfA_live = fetch_events("A", live_start, now_utc, batch=batch_tag or None)
+    dfB_live = fetch_events("B", live_start, now_utc, batch=batch_tag or None)
+
+    live_init = dfA_live["potato_id"].nunique() if not dfA_live.empty else 0
+    live_coll = dfB_live["potato_id"].nunique() if not dfB_live.empty else 0
+    live_loss = max(0, live_init - live_coll)
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Изначально (шт)", value=f"{live_init}")
+    m2.metric("Потери (шт)", value=f"{live_loss}")
+    m3.metric("Собрано (шт)", value=f"{live_coll}")
+
+    # мини-таблички последних событий
+    with st.expander("Последние события (A/B)"):
+        colA, colB = st.columns(2)
+        if not dfA_live.empty:
+            dfA_tail = dfA_live.sort_values("ts", ascending=False).head(20)
+            dfA_tail["ts"] = pd.to_datetime(dfA_tail["ts"]).dt.tz_localize("UTC").dt.tz_convert(TZ).dt.strftime("%Y-%m-%d %H:%M:%S")
+            colA.write("A — последние 20:")
+            df_view(dfA_tail[["ts","potato_id","width_cm","height_cm","batch"]])
+        else:
+            colA.info("Нет событий A за окно.")
+
+        if not dfB_live.empty:
+            dfB_tail = dfB_live.sort_values("ts", ascending=False).head(20)
+            dfB_tail["ts"] = pd.to_datetime(dfB_tail["ts"]).dt.tz_localize("UTC").dt.tz_convert(TZ).dt.strftime("%Y-%m-%d %H:%M:%S")
+            colB.write("B — последние 20:")
+            df_view(dfB_tail[["ts","potato_id","width_cm","height_cm","batch"]])
+        else:
+            colB.info("Нет событий B за окно.")
+
+    st.markdown("<hr/>", unsafe_allow_html=True)
+
+    # ==== ЕЖЕДНЕВНЫЙ РАЗДЕЛ (по выбранной локальной дате) ====
+    st.subheader("День (локальная дата)")
+    dcol1, dcol2 = st.columns([1, 1])
+    with dcol1:
+        st.date_input("Дата", key="day_picker")
+    with dcol2:
+        st.caption(f"Часовой пояс: {TZ}")
+
+    day = st.session_state["day_picker"]
+    start_day_utc, end_day_utc = local_day_bounds_to_utc(day)
+
+    dfA = fetch_events("A", start_day_utc, end_day_utc, batch=batch_tag or None)
+    dfB = fetch_events("B", start_day_utc, end_day_utc, batch=batch_tag or None)
+
+    # метрики за день
+    total_initial = dfA["potato_id"].nunique() if not dfA.empty else 0
+    total_collected = dfB["potato_id"].nunique() if not dfB.empty else 0
+    total_losses = max(0, total_initial - total_collected)
+
+    dm1, dm2, dm3 = st.columns(3)
+    dm1.metric("Изначально (шт)", value=f"{total_initial}")
+    dm2.metric("Потери (шт)", value=f"{total_losses}")
+    dm3.metric("Собрано (шт)", value=f"{total_collected}")
+
+    # поток по часам
+    st.markdown("### Поток по часам")
+    merged_hours = render_hour_chart_grouped(dfA, dfB)
+
+    # Excel-отчёт (часы + категории)
+    ha = hour_counts(dfA).rename(columns={"count": "Изначально (A)"})
+    hb = hour_counts(dfB).rename(columns={"count": "Итого (B)"})
+    hour_export = pd.merge(ha, hb, on="hour", how="outer").sort_values("hour").fillna(0)
+    hour_export = hour_export.rename(columns={"hour": "Дата и час"})
+
+    bins_df = bins_table(dfA, dfB)
+
+    file_bytes, ext, mime = make_excel_bytes(hour_export, bins_df)
+    st.download_button(
+        label="Скачать отчёт" + (" (Excel)" if ext == "xlsx" else " (ZIP/CSV)"),
+        data=file_bytes,
+        file_name=f"potato_report_{day.isoformat()}." + ext,
+        mime=mime,
+        use_container_width=True
+    )
+
+    # Автоперезапуск live-панели
+    if auto_refresh:
+        time.sleep(refresh_sec)
+        st.rerun()
+
+
+# ====== УТИЛИТА: Excel-выгрузка ======
 def make_excel_bytes(hour_df: pd.DataFrame, bins_df: pd.DataFrame) -> tuple[bytes, str, str]:
     try:
         import xlsxwriter  # noqa: F401
@@ -288,6 +419,7 @@ def make_excel_bytes(hour_df: pd.DataFrame, bins_df: pd.DataFrame) -> tuple[byte
                     else:
                         max_len = max(len(str(col_name)), int(col_series.astype(str).map(len).max() or 0))
                         ws.column_dimensions[col_letter].width = max_len + 2
+            # типы могут быть уже строками — не страшно
             autofit(ws_hours, hour_df); autofit(ws_bins, bins_df)
         return buf.getvalue(), "xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     except Exception:
@@ -299,325 +431,36 @@ def make_excel_bytes(hour_df: pd.DataFrame, bins_df: pd.DataFrame) -> tuple[byte
         zf.writestr("Категории.csv",    bins_df.to_csv(index=False))
     return buf.getvalue(), "zip", "application/zip"
 
-# ====== ЧАРТ ПО ЧАСАМ (без изменений) ======
-def render_hour_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame):
-    ha = hour_counts(dfA).rename(columns={"count": "initial"})   # A = Изначально
-    hb = hour_counts(dfB).rename(columns={"count": "collected"}) # B = Итого (Б)
-    merged = pd.merge(ha, hb, on="hour", how="outer").sort_values("hour")
-    if merged.empty:
-        st.info("Нет данных за выбранный период.")
-        return pd.DataFrame()
 
-    merged[["initial", "collected"]] = merged[["initial", "collected"]].fillna(0).astype(int)
-    merged["diff"] = (merged["initial"] - merged["collected"]).clip(lower=0)
-
-    long_df = pd.concat([
-        merged[["hour", "collected"]].rename(columns={"collected": "Значение"}).assign(Сегмент="Итого (B)"),
-        merged[["hour", "diff"]].rename(columns={"diff": "Значение"}).assign(Сегмент="Изначально (A)"),
-    ], ignore_index=True)
-
-    x_axis = alt.X(
-        "hour:T",
-        title="Дата и час",
-        axis=alt.Axis(titlePadding=24, labelOverlap=True, labelFlush=True, titleAnchor="start"),
-    )
-
-    chart = (
-        alt.Chart(long_df)
-        .mark_bar()
-        .encode(
-            x=x_axis,
-            y=alt.Y("Значение:Q", title="Количество", stack="zero"),
-            color=alt.Color("Сегмент:N", title="", scale=alt.Scale(domain=["Итого (B)", "Изначально (A)"])),
-            tooltip=[alt.Tooltip("hour:T", title="Час"), alt.Tooltip("Сегмент:N"), alt.Tooltip("Значение:Q", title="В сегменте")],
-        )
-        .properties(height=320, padding={"top": 10, "right": 12, "bottom": 44, "left": 8})
-        .configure_axis(labelFontSize=12, titleFontSize=12)
-    )
-
-    st.altair_chart(chart, use_container_width=True)
-    st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
-    return merged
-
-# ====== ЧАРТ ПО НЕДЕЛЯМ (с навигацией и русскими днями) ======
-RU_DOW = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
-
-def _shift_week(delta_days: int):
-    # callback для кнопок навигации
-    st.session_state["day_picker"] = st.session_state["day_picker"] + timedelta(days=delta_days)
-    
-def render_week_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame, week_start: date, week_end: date):
-    # Панель навигации неделями (кнопки "<" и ">")
-    nav_left, nav_center, nav_right = st.columns([1, 2, 1])
-    with nav_left:
-        st.button("<", key="week_prev_btn", on_click=_shift_week, args=(-7,))
-    with nav_center:
-        st.markdown(
-            f"<div style='text-align:center; font-weight:600;'>Неделя: {week_start.strftime('%d.%m')} — {week_end.strftime('%d.%m')}</div>",
-            unsafe_allow_html=True
-        )
-    with nav_right:
-        st.button(">", key="week_next_btn", on_click=_shift_week, args=(7,))
-
-    if dfA.empty and dfB.empty:
-        st.info("Нет данных за эту неделю.")
-        return pd.DataFrame()
-
-    # Агрегация по дням (локальное время уже учитывается в day_counts)
-    da = day_counts(dfA).rename(columns={"count": "initial"})
-    db = day_counts(dfB).rename(columns={"count": "collected"})
-
-    # Приводим ключ merge к наивным датам (убираем tz), чтобы типы совпали
-    da["day"] = pd.to_datetime(da["day"]).dt.tz_localize(None)
-    db["day"] = pd.to_datetime(db["day"]).dt.tz_localize(None)
-
-    # Каркас недели: всегда 7 дней Пн..Вс
-    base = pd.DataFrame({
-        "day": [pd.Timestamp(week_start + timedelta(days=i)) for i in range(7)],
-        "dow": list(range(7)),
-    })
-
-    # Сливаем
-    merged = base.merge(da, on="day", how="left").merge(db, on="day", how="left", suffixes=("", "_b"))
-    merged[["initial", "collected"]] = merged[["initial", "collected"]].fillna(0).astype(int)
-    merged["diff"] = (merged["initial"] - merged["collected"]).clip(lower=0)
-    merged["День"] = merged["dow"].map(lambda i: RU_DOW[i])
-    merged["Дата"] = merged["day"].dt.strftime("%Y-%m-%d")
-
-    # Длинный формат для stacked bar
-    long_df = pd.concat([
-        merged[["День", "Дата", "collected"]].rename(columns={"collected": "Значение"}).assign(Сегмент="Итого (B)"),
-        merged[["День", "Дата", "diff"]].rename(columns={"diff": "Значение"}).assign(Сегмент="Изначально (A)"),
-    ], ignore_index=True)
-
-    # Чарт — горизонтальные подписи дней недели
-    chart = (
-        alt.Chart(long_df)
-        .mark_bar()
-        .encode(
-            x=alt.X(
-                "День:N",
-                title="День недели",
-                sort=RU_DOW,
-                axis=alt.Axis(labelAngle=0, labelPadding=6, labelOverlap=False),
-            ),
-            y=alt.Y("Значение:Q", title="Количество", stack="zero"),
-            color=alt.Color("Сегмент:N", title="", scale=alt.Scale(domain=["Итого (B)", "Изначально (A)"])),
-            tooltip=[
-                alt.Tooltip("День:N"),
-                alt.Tooltip("Дата:N"),
-                alt.Tooltip("Сегмент:N"),
-                alt.Tooltip("Значение:Q", title="В сегменте"),
-            ],
-        )
-        .properties(height=320, padding={"top": 10, "right": 12, "bottom": 56, "left": 8})
-        .configure_axis(labelFontSize=12, titleFontSize=12)
-    )
-
-    st.altair_chart(chart, use_container_width=True)
-    return merged
+# ====== ЛОГИН (минимальный; если USE_SUPABASE=True) ======
+def page_login():
+    st.subheader("Вход в систему")
+    with st.form("login_form", clear_on_submit=False):
+        email = st.text_input("E-mail", placeholder="you@company.com")
+        password = st.text_input("Пароль", type="password", placeholder="••••••••")
+        submitted = st.form_submit_button("Войти")
+    if submitted:
+        ok = True
+        if USE_SUPABASE:
+            try:
+                resp = _sb.auth.sign_in_with_password({"email": email, "password": password})
+                ok = bool(getattr(resp, "user", None))
+                if not ok:
+                    st.error("Неверная почта или пароль.")
+            except Exception as e:
+                st.error(f"Ошибка авторизации: {e}")
+                ok = False
+        if ok:
+            st.session_state["authed"] = True
+            st.session_state["route"] = "app"
+            st.rerun()
+    st.caption("Доступ выдаётся администраторами.")
 
 
-# ====== ТОП-10 ДНЕЙ УРОЖАЯ ======
-def render_top10_days(dfA_31: pd.DataFrame, dfB_31: pd.DataFrame):
-    dB = day_counts(dfB_31)
-    if dB.empty:
-        st.info("Нет данных для топ-10 дней.")
-        return
-
-    top = dB.nlargest(10, "count").sort_values("count", ascending=True)
-    top["Дата"] = pd.to_datetime(top["day"]).dt.strftime("%Y-%m-%d")
-
-    chart = (
-        alt.Chart(top)
-        .mark_bar()
-        .encode(
-            x=alt.X("count:Q", title="Собрано (шт)"),
-            y=alt.Y("Дата:N", sort=None, title=""),
-            tooltip=[alt.Tooltip("Дата:N"), alt.Tooltip("count:Q", title="Собрано (шт)")],
-        )
-        .properties(height=28 * len(top) + 20)
-    )
-    st.altair_chart(chart, use_container_width=True)
-
-# ====== КАЛЬКУЛЯТОР КАПИТАЛА ======
-DEFAULT_WEIGHT_G = {"<30": 20.0, "30–40": 48.0, "40–50": 83.0, "50–60": 130.0, ">60": 205.0}
-DEFAULT_PRICE_KG = {"<30": 0.0,  "30–40": 0.0,  "40–50": 0.0,  "50–60": 0.0,  ">60": 0.0}
-
-def capital_calculator(bins_df: pd.DataFrame):
-    st.markdown("### Калькулятор капитала")
-
-    counts = dict(zip(bins_df["Категория"], bins_df["Собрано"]))
-
-    col_w = st.columns(5)
-    col_p = st.columns(5)
-    weights_g = {}
-    prices_kg = {}
-
-    for i, cat in enumerate(CATEGORIES):
-        with col_w[i]:
-            weights_g[cat] = st.number_input(
-                f"Вес ({cat}), г/шт",
-                min_value=0.0,
-                step=10.0,
-                value=float(DEFAULT_WEIGHT_G.get(cat, 0.0)),
-                format="%.2f",
-                key=f"calc_w_{cat}",
-            )
-        with col_p[i]:
-            prices_kg[cat] = st.number_input(
-                f"Цена ({cat}), тг/кг",
-                min_value=0.0,
-                step=10.0,
-                value=float(DEFAULT_PRICE_KG.get(cat, 0.0)),
-                format="%.2f",
-                key=f"calc_p_{cat}",
-            )
-
-    kg_totals = {cat: (counts.get(cat, 0) * weights_g.get(cat, 0.0)) / 1000.0 for cat in CATEGORIES}
-    subtotals = {cat: kg_totals[cat] * prices_kg.get(cat, 0.0) for cat in CATEGORIES}
-    total_sum = round(sum(subtotals.values()), 2)
-
-    calc_df = pd.DataFrame({
-        "Категория":        CATEGORIES,
-        "Собрано (шт)":     [int(counts.get(c, 0)) for c in CATEGORIES],
-        "Вес, г/шт":        [weights_g[c] for c in CATEGORIES],
-        "Итого, кг":        [round(kg_totals[c], 3) for c in CATEGORIES],
-        "Цена, тг/кг":      [prices_kg[c] for c in CATEGORIES],
-        "Сумма, тг":        [round(subtotals[c], 2) for c in CATEGORIES],
-    })
-    df_view(calc_df)
-    st.subheader(f"Итого капитал: **{total_sum:,.2f} тг**".replace(",", " "))
-
-# ====== ВЕСОВАЯ ТАБЛИЦА ======
-def render_weight_table(day: date):
-    rng = random.Random(1000 + int(day.strftime("%Y%m%d")))
-    hours = [10, 12, 14, 16]
-    weights = [round(rng.uniform(0.12, 0.22), 3) for _ in hours]  # тонны
-    rows = []
-    for h, w in zip(hours, weights):
-        ts = datetime.combine(day, time(h, 0))
-        rows.append({"Дата и час": ts.strftime("%Y-%m-%d %H:%M"), "Вес, т": w})
-    df = pd.DataFrame(rows)
-    st.markdown("### Весовая таблица")
-    df_view(df)
-
-# ====== ГЛАВНАЯ СТРАНИЦА ======
-def page_dashboard_online():
-    header()
-
-    c_top1, c_top2, c_top3 = st.columns([1.3,1,1])
-    with c_top1:
-        st.date_input("Дата", key="day_picker")  # без value=..., используем session_state
-    with c_top2:
-        # фильтр по batch
-        batch_tag = st.text_input("batch-тег (необязательно)", value="")
-        # простая кнопка ручного обновления
-        if st.button("Обновить данные"):
-            st.experimental_rerun()
-    with c_top3:
-        top_right = st.container()
-        if st.button("Выйти"):
-            st.session_state["authed"] = False
-            go("login")
-
-    st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
-
-    # --- Данные за выбранный день (локальный день → UTC-диапазон)
-    day = st.session_state["day_picker"]
-    start, end = local_day_bounds_to_utc(day)
-
-    if FORCE_DEMO_DATA:
-        dfA, dfB = demo_generate(day)
-    else:
-        dfA = fetch_events("A", start, end, batch=batch_tag or None)
-        dfB = fetch_events("B", start, end, batch=batch_tag or None)
-        if dfA.empty and dfB.empty:
-            st.info("Нет данных за выбранный день.")
-            st.stop()
-
-    # --- Ключевые метрики за день
-    total_initial = dfA["potato_id"].nunique() if not dfA.empty else 0
-    total_collected = dfB["potato_id"].nunique() if not dfB.empty else 0
-    total_losses = max(0, total_initial - total_collected)
-
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Изначально (шт)", value=f"{total_initial}")
-    m2.metric("Потери (шт)", value=f"{total_losses}")
-    m3.metric("Собрано (шт)", value=f"{total_collected}")
-
-    # --- Поток по часам
-    st.markdown("### Поток по часам")
-    merged_hours = render_hour_chart_grouped(dfA, dfB)
-
-    # --- Excel (часы + категории)
-    ha = hour_counts(dfA).rename(columns={"count": "Изначально (A)"})
-    hb = hour_counts(dfB).rename(columns={"count": "Итого (B)"})
-    hour_export = pd.merge(ha, hb, on="hour", how="outer").sort_values("hour")
-    hour_export = hour_export.fillna(0).rename(columns={"hour": "Дата и час"})
-    bins_df = bins_table(dfA, dfB)
-
-    file_bytes, ext, mime = make_excel_bytes(hour_export, bins_df)
-    with top_right:
-        st.download_button(
-            label="Скачать отчёт" + (" (Excel)" if ext == "xlsx" else " (ZIP/CSV)"),
-            data=file_bytes,
-            file_name=f"potato_report_{day.isoformat()}." + ext,
-            mime=mime,
-            use_container_width=True
-        )
-
-    # --- Данные за последние 31 день (для топ-10) — без batch-фильтра (обзорно)
-    start_31_local = day - timedelta(days=30)
-    start_31_utc, end_31_utc = local_day_bounds_to_utc(start_31_local)
-    _, end_today_utc = local_day_bounds_to_utc(day)
-
-    if FORCE_DEMO_DATA:
-        dfA_31, dfB_31 = demo_generate_range(day, days=31)
-    else:
-        dfA_31 = fetch_events("A", start_31_utc, end_today_utc)
-        dfB_31 = fetch_events("B", start_31_utc, end_today_utc)
-
-    # --- Поток по неделям (локальная неделя)
-    st.markdown("### Поток по неделям")
-    week_start, week_end = week_bounds(day)
-    if FORCE_DEMO_DATA:
-        wA, wB = demo_generate_week(week_start, week_end)
-        render_week_chart_grouped(wA, wB, week_start, week_end)
-    else:
-        ws_utc, _ = local_day_bounds_to_utc(week_start)
-        _, we_utc = local_day_bounds_to_utc(week_end)
-        wA = fetch_events("A", ws_utc, we_utc)
-        wB = fetch_events("B", ws_utc, we_utc)
-        if wA.empty and wB.empty:
-            st.info("Нет данных за выбранную неделю.")
-        else:
-            render_week_chart_grouped(wA, wB, week_start, week_end)
-
-    # --- Топ-10 дней урожая
-    st.markdown("### Топ-10 дней урожая за последние 31 день")
-    if FORCE_DEMO_DATA:
-        render_top10_days(dfA_31, dfB_31)
-    else:
-        if dfA_31.empty and dfB_31.empty:
-            st.info("Нет данных за последние 31 день.")
-        else:
-            render_top10_days(dfA_31, dfB_31)
-
-    # --- Таблица по категориям
-    st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
-    st.markdown("### Таблица по количеству")
-    df_view(bins_df[["Категория","Изначально","Потери (шт)","Собрано","% потери"]])
-
-    # --- Весовая таблица (демо 4 строки)
-    render_weight_table(day)  # это демонстрационный блок, при необходимости уберите
-
-    # --- Калькулятор
-    capital_calculator(bins_df)
-
-# ====== APP (без вкладок) ======
+# ====== APP ======
 def page_app():
     page_dashboard_online()
+
 
 # ====== MAIN ======
 def main():
@@ -625,7 +468,7 @@ def main():
         st.session_state["authed"] = True
         st.session_state["route"] = "app"
 
-    route = st.session_state.get("route", "login")
+    route = st.session_state.get("route", "app")
     authed = st.session_state.get("authed", False)
 
     if route == "login" and USE_SUPABASE and not authed:
@@ -634,6 +477,7 @@ def main():
         return
 
     page_app()
+
 
 if __name__ == "__main__":
     main()
