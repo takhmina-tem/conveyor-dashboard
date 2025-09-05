@@ -345,7 +345,6 @@ RU_DOW = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 def _shift_week(delta_days: int):
     # callback для кнопок навигации
     st.session_state["day_picker"] = st.session_state["day_picker"] + timedelta(days=delta_days)
-
 def render_week_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame, week_start: date, week_end: date):
     # Панель навигации неделями (кнопки "<" и ">")
     nav_left, nav_center, nav_right = st.columns([1, 2, 1])
@@ -363,48 +362,60 @@ def render_week_chart_grouped(dfA: pd.DataFrame, dfB: pd.DataFrame, week_start: 
         st.info("Нет данных за эту неделю.")
         return pd.DataFrame()
 
-    # Агрегация по дням недели (0=Пн..6=Вс)
+    # Агрегация по дням (локальное время уже учитывается в day_counts)
     da = day_counts(dfA).rename(columns={"count": "initial"})
     db = day_counts(dfB).rename(columns={"count": "collected"})
 
-    # Готовим полный каркас недели, чтобы всегда было 7 столбиков
+    # Приводим ключ merge к наивным датам (убираем tz), чтобы типы совпали
+    da["day"] = pd.to_datetime(da["day"]).dt.tz_localize(None)
+    db["day"] = pd.to_datetime(db["day"]).dt.tz_localize(None)
+
+    # Каркас недели: всегда 7 дней Пн..Вс
     base = pd.DataFrame({
         "day": [pd.Timestamp(week_start + timedelta(days=i)) for i in range(7)],
         "dow": list(range(7)),
     })
 
-    da["day"] = pd.to_datetime(da["day"]).dt.tz_localize(None)
-    db["day"] = pd.to_datetime(db["day"]).dt.tz_localize(None)
-
-    merged = (
-        base.merge(da, on="day", how="left")
-            .merge(db, on="day", how="left", suffixes=("", "_b"))
-    )
-    
+    # Сливаем
+    merged = base.merge(da, on="day", how="left").merge(db, on="day", how="left", suffixes=("", "_b"))
     merged[["initial", "collected"]] = merged[["initial", "collected"]].fillna(0).astype(int)
     merged["diff"] = (merged["initial"] - merged["collected"]).clip(lower=0)
     merged["День"] = merged["dow"].map(lambda i: RU_DOW[i])
     merged["Дата"] = merged["day"].dt.strftime("%Y-%m-%d")
 
+    # Длинный формат для stacked bar
     long_df = pd.concat([
         merged[["День", "Дата", "collected"]].rename(columns={"collected": "Значение"}).assign(Сегмент="Итого (B)"),
         merged[["День", "Дата", "diff"]].rename(columns={"diff": "Значение"}).assign(Сегмент="Изначально (A)"),
     ], ignore_index=True)
 
+    # Чарт — горизонтальные подписи дней недели
     chart = (
         alt.Chart(long_df)
         .mark_bar()
         .encode(
-            x=alt.X("День:N", title="День недели", sort=RU_DOW),
+            x=alt.X(
+                "День:N",
+                title="День недели",
+                sort=RU_DOW,
+                axis=alt.Axis(labelAngle=0, labelPadding=6, labelOverlap=False),
+            ),
             y=alt.Y("Значение:Q", title="Количество", stack="zero"),
             color=alt.Color("Сегмент:N", title="", scale=alt.Scale(domain=["Итого (B)", "Изначально (A)"])),
-            tooltip=[alt.Tooltip("День:N"), alt.Tooltip("Дата:N"), alt.Tooltip("Сегмент:N"), alt.Tooltip("Значение:Q", title="В сегменте")],
+            tooltip=[
+                alt.Tooltip("День:N"),
+                alt.Tooltip("Дата:N"),
+                alt.Tooltip("Сегмент:N"),
+                alt.Tooltip("Значение:Q", title="В сегменте"),
+            ],
         )
-        .properties(height=320, padding={"top": 10, "right": 12, "bottom": 44, "left": 8})
+        .properties(height=320, padding={"top": 10, "right": 12, "bottom": 56, "left": 8})
         .configure_axis(labelFontSize=12, titleFontSize=12)
     )
+
     st.altair_chart(chart, use_container_width=True)
     return merged
+
 
 # ====== ТОП-10 ДНЕЙ УРОЖАЯ ======
 def render_top10_days(dfA_31: pd.DataFrame, dfB_31: pd.DataFrame):
