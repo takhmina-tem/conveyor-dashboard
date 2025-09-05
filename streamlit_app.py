@@ -125,10 +125,10 @@ CAT_BINS_MM = [0, 30, 40, 50, 60, 1_000_000]
 
 def bins_table_mm_collected(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
-        return pd.DataFrame({"Категория": CAT_LABELS, "Собрано (шт)": [0]*len(CAT_LABELS]})
+        return pd.DataFrame({"Категория": CAT_LABELS, "Собрано (шт)": [0]*len(CAT_LABELS)})
     d = add_mm_columns(df)
     if "width_mm" not in d.columns or d["width_mm"].dropna().empty:
-        return pd.DataFrame({"Категория": CAT_LABELS, "Собрано (шт)": [0]*len(CAT_LABELS]})
+        return pd.DataFrame({"Категория": CAT_LABELS, "Собрано (шт)": [0]*len(CAT_LABELS)})
     cut = pd.cut(d["width_mm"].fillna(-1), bins=CAT_BINS_MM, labels=CAT_LABELS, right=False, include_lowest=True)
     vc = cut.value_counts().reindex(CAT_LABELS).fillna(0).astype(int)
     return pd.DataFrame({"Категория": CAT_LABELS, "Собрано (шт)": [int(vc[c]) for c in CAT_LABELS]})
@@ -149,15 +149,15 @@ def remap_multi_live_hours_to_target(df: pd.DataFrame, now_utc: datetime, hours:
         return df
 
     df = df.copy()
-    # вычисляем индекс live-часа (0 = текущий час, 1 = предыдущий, ...)
+    # индекс live-часа (0 = текущий час, 1 = предыдущий, ...)
     delta = (now_utc - df["ts"]).dt.total_seconds()
-    bin_idx = (delta // 3600).astype("Int64")  # допускаем NA
+    bin_idx = (delta // 3600).astype("Int64")
     mask = (bin_idx >= 0) & (bin_idx < hours)
     df = df[mask.fillna(False)].copy()
     if df.empty:
         return df
 
-    # Смещение внутри своего часа (минуты/секунды) сохраняем
+    # смещение внутри часа
     ts_floor = df["ts"].dt.floor("h")
     minute_offset = df["ts"] - ts_floor
 
@@ -226,7 +226,6 @@ def make_excel_bytes(hour_df: pd.DataFrame, bins_df: pd.DataFrame) -> tuple[byte
     return buf.getvalue(), "zip", "application/zip"
 
 # ===== Калькулятор капитала (значения по умолчанию = 0) =====
-CAT_LABELS = ["<30 мм", "30–40 мм", "40–50 мм", "50–60 мм", ">60 мм"]
 DEFAULT_WEIGHT_G = {c: 0.0 for c in CAT_LABELS}
 DEFAULT_PRICE_KG = {c: 0.0 for c in CAT_LABELS}
 
