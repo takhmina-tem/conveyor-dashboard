@@ -11,7 +11,7 @@ import pandas as pd
 import altair as alt
 
 # ====== РЕЖИМ ДЕМО ДАННЫХ (НЕ ВЛИЯЕТ НА АВТОРИЗАЦИЮ) ======
-FORCE_DEMO_DATA = True  # ← поставьте False, чтобы читать реальные данные из БД
+FORCE_DEMO_DATA = False  # ← читаем реальные данные из БД
 
 # ====== БАЗОВЫЕ НАСТРОЙКИ ======
 st.set_page_config(
@@ -494,7 +494,8 @@ def page_dashboard_online():
         dfA = fetch_events("A", start, end)
         dfB = fetch_events("B", start, end)
         if dfA.empty and dfB.empty:
-            dfA, dfB = demo_generate(day)
+            st.info("Нет данных за выбранный день.")
+            st.stop()
 
     # --- Ключевые метрики за день
     total_initial = dfA["potato_id"].nunique() if not dfA.empty else 0
@@ -536,27 +537,32 @@ def page_dashboard_online():
     else:
         dfA_31 = fetch_events("A", start_31, end_31)
         dfB_31 = fetch_events("B", start_31, end_31)
-        if dfA_31.empty and dfB_31.empty:
-            dfA_31, dfB_31 = demo_generate_range(day, days=31)
 
     # --- Поток по неделям (с навигацией и русскими днями)
     st.markdown("### Поток по неделям")
     week_start, week_end = week_bounds(day)
     if FORCE_DEMO_DATA:
         wA, wB = demo_generate_week(week_start, week_end)
+        render_week_chart_grouped(wA, wB, week_start, week_end)
     else:
         ws_dt = datetime.combine(week_start, time.min).replace(tzinfo=timezone.utc)
         we_dt = datetime.combine(week_end,   time.max).replace(tzinfo=timezone.utc)
         wA = fetch_events("A", ws_dt, we_dt)
         wB = fetch_events("B", ws_dt, we_dt)
         if wA.empty and wB.empty:
-            wA, wB = demo_generate_week(week_start, week_end)
-
-    render_week_chart_grouped(wA, wB, week_start, week_end)
+            st.info("Нет данных за выбранную неделю.")
+        else:
+            render_week_chart_grouped(wA, wB, week_start, week_end)
 
     # --- Топ-10 дней урожая
     st.markdown("### Топ-10 дней урожая за последние 31 день")
-    render_top10_days(dfA_31, dfB_31)
+    if FORCE_DEMO_DATA:
+        render_top10_days(dfA_31, dfB_31)
+    else:
+        if dfA_31.empty and dfB_31.empty:
+            st.info("Нет данных за последние 31 день.")
+        else:
+            render_top10_days(dfA_31, dfB_31)
 
     # --- Таблица по категориям
     st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
@@ -564,7 +570,7 @@ def page_dashboard_online():
     df_view(bins_df[["Категория","Изначально","Потери (шт)","Собрано","% потери"]])
 
     # --- Весовая таблица (демо 4 строки)
-    render_weight_table(day)
+    render_weight_table(day)  # это демонстрационный блок, при необходимости убери
 
     # --- Калькулятор
     capital_calculator(bins_df)
