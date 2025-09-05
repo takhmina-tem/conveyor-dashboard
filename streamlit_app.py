@@ -1,24 +1,25 @@
 # streamlit_app.py
 import os
 from datetime import datetime, date, time as dtime, timedelta, timezone
-from typing import Optional
 from io import BytesIO
 import zipfile
+from typing import Optional
 
 import streamlit as st
 import pandas as pd
 import altair as alt
 from zoneinfo import ZoneInfo
 
-# ===== Настройки отображения =====
-TZ = ZoneInfo("Asia/Aqtobe")     # локальное время для отображения
-TARGET_DAY_LOCAL   = date(2025, 9, 4)  # показываем "вчера": 4 сентября
-TARGET_START_HOUR  = 14                 # 14,15,16,17,18 (5 часов)
+# ========== Конфигурация отображения ==========
+TZ = ZoneInfo("Asia/Aqtobe")           # локальная зона для показа
+TARGET_DAY_LOCAL   = date(2025, 9, 4)  # «вчера» — 4 сентября
+TARGET_START_HOUR  = 14                # 14,15,16,17,18 (5 часов)
 TARGET_END_HOUR    = 19                # не включительно
 
-st.set_page_config(page_title="Система отслеживания и учёта картофеля", page_icon="🥔", layout="wide")
+st.set_page_config(page_title="Система отслеживания и учёта картофеля",
+                   page_icon="🥔", layout="wide")
 
-# ===== Ключи Supabase =====
+# ========= Supabase =========
 SUPABASE_URL = st.secrets.get("SUPABASE_URL", os.getenv("SUPABASE_URL"))
 SUPABASE_ANON_KEY = st.secrets.get("SUPABASE_ANON_KEY", os.getenv("SUPABASE_ANON_KEY"))
 
@@ -32,7 +33,7 @@ if USE_SUPABASE:
         st.warning(f"Не удалось инициализировать Supabase: {e}")
         USE_SUPABASE = False
 
-# ===== Стили =====
+# ========= Оформление =========
 st.markdown("""
 <style>
   .block-container { padding-top: 1.5rem; }
@@ -53,10 +54,7 @@ def header():
     if st.button("↻ Обновить", use_container_width=True):
         st.rerun()
 
-# ===== Утилиты времени =====
-def to_aware_utc(dt: datetime) -> datetime:
-    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-
+# ========= Время/оси =========
 def local_to_utc(d: date, hour: int) -> datetime:
     return datetime.combine(d, dtime(hour=hour)).replace(tzinfo=TZ).astimezone(timezone.utc)
 
@@ -65,12 +63,18 @@ def fixed_target_hours_index() -> pd.DatetimeIndex:
                    for h in range(TARGET_START_HOUR, TARGET_END_HOUR)]
     return pd.DatetimeIndex(pd.to_datetime(hours_local)).tz_localize(None)
 
-# ===== Чтение Supabase (последний batch, без фильтра точки) =====
+# ========= Загрузка данных (последний batch, пагинация) =========
 def get_latest_batch() -> Optional[str]:
+    """Возвращает batch самой свежей записи (не пустой)."""
     if not USE_SUPABASE:
         return None
     try:
-        r = _sb.table("events").select("batch,ts").order("ts", desc=True).limit(1).execute()
+        r = (_sb.table("events")
+               .select("batch,ts")
+               .order("ts", desc=True)
+               .neq("batch", "")
+               .limit(1)
+               .execute())
         if r.data and r.data[0].get("batch"):
             return r.data[0]["batch"]
     except Exception as e:
@@ -78,22 +82,58 @@ def get_latest_batch() -> Optional[str]:
     return None
 
 def fetch_events_by_batch(batch: str) -> pd.DataFrame:
+    """
+    Возвращает ВСЕ события данного batch (без фильтра точки),
+    подбирая страницы по 1000 строк — обходим лимит PostgREST.
+    """
     if not USE_SUPABASE:
         return pd.DataFrame(columns=["ts","potato_id","width_cm","height_cm","width","height","batch"])
+
+    rows = []
+    page = 0
+    page_size = 1000
     try:
-        rows = _sb.table("events").select("*").eq("batch", batch).order("ts", desc=False).execute().data
-        df = pd.DataFrame(rows) if rows else pd.DataFrame()
-        if "ts" in df.columns:
-            df["ts"] = pd.to_datetime(df["ts"], utc=True, errors="coerce")
-        for c in ("width_cm","height_cm","width","height"):
-            if c in df.columns:
-                df[c] = pd.to_numeric(df[c], errors="coerce")
+        while True:
+            start = page * page_size
+            end   = start + page_size - 1
+            resp = (_sb.table("events")
+                      .select("*")
+                      .eq("batch", batch)
+                      .order("ts", desc=False)
+                      .range(start, end)        # <<< ключ!
+                      .execute())
+            data = resp.data or []
+            rows.extend(data)
+            if len(data) < page_size:  # последняя страница
+                break
+            page += 1
+
+        df = pd.DataFrame(rows)
+        if not df.empty:
+            if "ts" in df.columns:
+                df["ts"] = pd.to_datetime(df["ts"], utc=True, errors="coerce")
+            for c in ("width_cm","height_cm","width","height"):
+                if c in df.columns:
+                    df[c] = pd.to_numeric(df[c], errors="coerce")
         return df
     except Exception as e:
         st.warning(f"Ошибка чтения batch={batch}: {e}")
         return pd.DataFrame()
 
-# ===== Размеры → миллиметры + категории =====
+def server_count_by_batch(batch: str) -> Optional[int]:
+    """Серверный COUNT — для диагностики (не обязателен для логики)."""
+    if not USE_SUPABASE:
+        return None
+    try:
+        resp = (_sb.table("events")
+                  .select("potato_id", count="exact")
+                  .eq("batch", batch)
+                  .execute())
+        return getattr(resp, "count", None)
+    except Exception:
+        return None
+
+# ========= Размеры → мм и категории =========
 def add_mm_columns(df: pd.DataFrame) -> pd.DataFrame:
     d = df.copy()
     # width_cm/height_cm приоритетны; если их нет — width/height (тоже в см)
@@ -105,11 +145,10 @@ CAT_LABELS = ["<30 мм", "30–40 мм", "40–50 мм", "50–60 мм", ">60 �
 CAT_BINS_MM = [0, 30, 40, 50, 60, 1_000_000]
 
 def bins_table_mm_collected(df: pd.DataFrame) -> pd.DataFrame:
-    """Категории по ширине (мм) по уникальным potato_id."""
+    """Категории по ширине (мм) по уникальным potato_id (дедуп — последняя запись)."""
     if df.empty:
         return pd.DataFrame({"Категория": CAT_LABELS, "Собрано (шт)": [0]*len(CAT_LABELS)})
     d = add_mm_columns(df)
-    # дедуп по клубню (берём последнюю запись по времени)
     if "potato_id" in d.columns:
         d = d.sort_values("ts").drop_duplicates(subset="potato_id", keep="last")
     if "width_mm" not in d.columns or d["width_mm"].dropna().empty:
@@ -120,16 +159,15 @@ def bins_table_mm_collected(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame({"Категория": CAT_LABELS,
                          "Собрано (шт)": [int(vc[c]) for c in CAT_LABELS]})
 
-# ===== Перенос времени запуска → вчера 14–19 =====
+# ========= Перенос времени запуска → «вчера 14–19» =========
 def remap_run_to_target(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Переносим события текущего batch на шкалу «вчера 14–19»:
-    час 0 от старта запуска -> 14–15, час 1 -> 15–16, ... (клип до 5 часов).
+    Час 0 от старта запуска -> 14–15, час 1 -> 15–16, ... клип до 5 часов.
     """
     if df.empty or "ts" not in df.columns:
         return df
     d = df.copy()
-    run_start = d["ts"].min()  # UTC, aware
+    run_start = d["ts"].min()  # UTC
     ts_floor  = d["ts"].dt.floor("h")
     elapsed_h = ((ts_floor - run_start) / pd.Timedelta(hours=1)).astype(int).clip(lower=0, upper=4)  # 0..4
     minute_off = d["ts"] - ts_floor
@@ -168,7 +206,7 @@ def render_hour_chart_fixed(df_disp: pd.DataFrame):
     st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
     return hc
 
-# ===== Экспорт =====
+# ========= Экспорт =========
 def make_excel_bytes(hour_df: pd.DataFrame, bins_df: pd.DataFrame) -> tuple[bytes, str, str]:
     try:
         import xlsxwriter  # noqa
@@ -194,7 +232,7 @@ def make_excel_bytes(hour_df: pd.DataFrame, bins_df: pd.DataFrame) -> tuple[byte
         zf.writestr("bins_mm.csv",  bins_df.to_csv(index=False))
     return buf.getvalue(), "zip", "application/zip"
 
-# ===== Калькулятор капитала (по умолчанию нули) =====
+# ========= Калькулятор (значения по умолчанию = 0) =========
 DEFAULT_WEIGHT_G = {c: 0.0 for c in CAT_LABELS}
 DEFAULT_PRICE_KG = {c: 0.0 for c in CAT_LABELS}
 
@@ -230,27 +268,28 @@ def capital_calculator_mm(bins_df: pd.DataFrame):
     st.dataframe(calc_df, use_container_width=True)
     st.subheader(f"Итого капитал: **{total_sum:,.2f} тг**".replace(",", " "))
 
-# ===== Страница =====
+# ========= Страница =========
 def page_dashboard():
     header()
 
     latest_batch = get_latest_batch()
     if not latest_batch:
-        st.info("Нет данных (колонка batch пуста). Убедись, что приложение пишет batch для событий.")
+        st.info("Нет данных (batch пуст). Убедись, что приложение пишет batch для событий.")
         return
 
-    # читаем весь последний batch
     df_run = fetch_events_by_batch(latest_batch)
 
-    # перенос часов в «вчера 14–19»
-    df_disp = remap_run_to_target(df_run)
+    # Диагностика загрузки
+    srv_cnt = server_count_by_batch(latest_batch)
+    st.caption(f"Текущий batch: {latest_batch} | строк в БД: {srv_cnt if srv_cnt is not None else '—'} | загружено: {len(df_run)}")
 
-    # метрика: Собрано (шт) по уникальным potato_id
+    # Метрика: Собрано (шт) — уникальные картофелины
     total_collected = df_run["potato_id"].nunique() if not df_run.empty else 0
     st.metric("Собрано (шт)", value=f"{total_collected}")
 
-    # Поток по часам (фиксированные 14..18)
+    # Поток по часам (фиксированная ось 14..18 за 04.09)
     st.markdown("### Поток по часам")
+    df_disp = remap_run_to_target(df_run)
     hc = render_hour_chart_fixed(df_disp)
 
     # Таблица по категориям (мм), по уникальным potato_id
@@ -272,7 +311,7 @@ def page_dashboard():
     # Калькулятор
     capital_calculator_mm(bins_df)
 
-# ===== MAIN =====
+# ========= MAIN =========
 def main():
     page_dashboard()
 
